@@ -473,7 +473,7 @@ class AIBot {
 
 (function copyPenaltyMethodsToAIBot() {
   if (typeof TetrisGame === 'undefined') return;
-  const names = ['applyPenalty', 'addGarbage', '_garbageRectOccupied', '_placeGarbageRect', '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_penaltyColumns', '_penaltyShower', '_resolveCurrentAfterGarbage'];
+  const names = ['applyPenalty', 'addGarbage', '_garbageRectOccupied', '_placeGarbageRect', '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_resolveCurrentAfterGarbage'];
   names.forEach((n) => { AIBot.prototype[n] = TetrisGame.prototype[n]; });
 })();
 

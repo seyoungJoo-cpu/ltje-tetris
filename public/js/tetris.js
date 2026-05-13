@@ -3,7 +3,7 @@
 
 const COLS = 10, ROWS = 20;
 const BLOCK = 24; // my canvas block size
-const OPP_BLOCK = 15; // opponent minimap block size (온라인 상대 미니맵)
+const OPP_BLOCK = 18; // opponent minimap block size (온라인 상대 미니맵)
 
 const COLORS = {
   I: '#00e5ff',
@@ -272,11 +272,8 @@ class TetrisGame {
       case 'meteor':
         this._penaltyMeteors(penalty.meteors || 1);
         break;
-      case 'columns':
-        this._penaltyColumns(penalty.cols || 2, penalty.depth || 3);
-        break;
-      case 'shower':
-        this._penaltyShower(penalty.blocks || 8);
+      case 'cloud':
+      case 'ink':
         break;
       default:
         this._penaltyRows(penalty.lines || penalty.power || 1, 1);
@@ -354,40 +351,6 @@ class TetrisGame {
         let py = -1;
         while (!this._garbageRectOccupied(px, py + 1, 1, 1)) py++;
         this._placeGarbageRect(px, py, 1, 1);
-      }
-    }
-  }
-
-  _penaltyColumns(colCount, depth) {
-    const nc = Math.max(1, Math.min(COLS, parseInt(colCount, 10) || 2));
-    const d = Math.max(1, Math.min(ROWS, parseInt(depth, 10) || 3));
-    const cols = [];
-    while (cols.length < nc) {
-      const c = Math.floor(Math.random() * COLS);
-      if (!cols.includes(c)) cols.push(c);
-    }
-    for (const col of cols) {
-      let placed = 0;
-      for (let r = ROWS - 1; r >= 0 && placed < d; r--) {
-        if (this.board[r][col] === 0) {
-          this.board[r][col] = 'G';
-          placed++;
-        }
-      }
-    }
-  }
-
-  _penaltyShower(blocks) {
-    const b = Math.max(3, Math.min(24, parseInt(blocks, 10) || 8));
-    for (let k = 0; k < b; k++) {
-      let placed = false;
-      for (let t = 0; t < 40 && !placed; t++) {
-        const c = Math.floor(Math.random() * COLS);
-        const r = Math.floor(Math.random() * 10);
-        if (this.board[r][c] === 0) {
-          this.board[r][c] = 'G';
-          placed = true;
-        }
       }
     }
   }
@@ -519,6 +482,8 @@ class TetrisGame {
   _bindKeys() {
     document.addEventListener('keydown', (e) => {
       if (!this.running) return;
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
       if (this.allowPause && (e.key === 'p' || e.key === 'P')) {
         if (!this.gameOver) {
           e.preventDefault();

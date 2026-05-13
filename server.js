@@ -280,14 +280,8 @@ function rollPenaltyPayload(power) {
   if (r < 0.48) return { kind: 'cheese', lines: Math.min(8, Math.max(2, p)) };
   if (r < 0.64) return { kind: 'split', lines: p };
   if (r < 0.78) return { kind: 'meteor', meteors: Math.min(6, Math.max(1, Math.ceil(p / 2))) };
-  if (r < 0.90) {
-    return {
-      kind: 'columns',
-      cols: Math.min(4, Math.max(2, 1 + Math.floor(p / 4))),
-      depth: Math.min(6, Math.max(2, 2 + (p % 4))),
-    };
-  }
-  return { kind: 'shower', blocks: Math.min(18, 5 + p * 2) };
+  if (r < 0.89) return { kind: 'cloud', ms: 4000 };
+  return { kind: 'ink', ms: Math.min(4800, Math.max(2600, 2400 + p * 180)) };
 }
 
 function emitGarbageToTarget(io, room, roomId, fromId, targetId, n) {

@@ -34,7 +34,12 @@ function spawnHostAiBots(playersList) {
     const ch = typeof ROWS !== 'undefined' && typeof BLOCK !== 'undefined' ? ROWS * BLOCK : 480;
     c.width = cw;
     c.height = ch;
-    root.appendChild(c);
+    const wrap = document.createElement('div');
+    wrap.className = 'online-bot-board-wrap';
+    wrap.dataset.botId = String(p.id);
+    wrap.style.cssText = 'position:relative;display:inline-block;line-height:0;';
+    wrap.appendChild(c);
+    root.appendChild(wrap);
     const ps = parseInt(p.stage, 10);
     const stage = Number.isFinite(ps) && ps >= 1 && ps <= 7 ? ps : (3 + Math.floor(Math.random() * 4));
     const bot = new AIBot(
@@ -328,6 +333,7 @@ function renderRanking(data) {
 // ── 채팅 ──
 function addChat(containerId, nickname, msg, isSystem = false) {
   const el = document.getElementById(containerId);
+  if (!el) return;
   const div = document.createElement('div');
   div.className = 'chat-msg' + (isSystem ? ' system' : '');
   div.innerHTML = isSystem
@@ -353,6 +359,33 @@ function sendRoomChat() {
   input.value = '';
 }
 
+function sendGameLiveChat() {
+  const input = document.getElementById('game-live-chat-input');
+  if (!input) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+  socket.emit('chat:room', msg);
+  input.value = '';
+}
+
+function clearGameLiveChat() {
+  const el = document.getElementById('game-live-chat');
+  if (el) el.innerHTML = '';
+}
+
+function addGameLiveChatLine(nickname, msg, isSystem) {
+  const el = document.getElementById('game-live-chat');
+  const gs = document.getElementById('game-screen');
+  if (!el || !gs || !gs.classList.contains('active')) return;
+  const div = document.createElement('div');
+  div.className = 'game-live-chat-msg' + (isSystem ? ' system' : '');
+  div.innerHTML = isSystem
+    ? escHtml(msg)
+    : `<span class="game-live-nick">${escHtml(nickname)}</span><span class="game-live-txt">${escHtml(msg)}</span>`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
 function createOppPanelWrap(p, isMate) {
   const wrap = document.createElement('div');
   wrap.className = 'opponent-panel-wrap' + (isMate ? ' teammate' : '');
@@ -366,7 +399,9 @@ function createOppPanelWrap(p, isMate) {
         <span class="oth-pwr">0</span>
         <span class="oth-locks">0/3</span>
       </div>
-      <canvas class="opp-canvas" id="opp-${p.id}" width="${cw}" height="${ch}"></canvas>
+      <div class="opp-board-wrap">
+        <canvas class="opp-canvas" id="opp-${p.id}" width="${cw}" height="${ch}"></canvas>
+      </div>
     </div>`;
   opponentCanvases[p.id] = wrap.querySelector('canvas');
   return wrap;
@@ -405,6 +440,7 @@ function startGame(players, showGhost) {
   document.getElementById('my-label').textContent = myNickname;
   document.getElementById('game-room-name').textContent = myRoomData?.name || '';
   clearIncomingThreatUi();
+  clearGameLiveChat();
 
   opponentCanvases = {};
   const oppPanel = document.getElementById('opponents-panel');
@@ -464,13 +500,14 @@ function startGame(players, showGhost) {
   spawnHostAiBots(players);
 }
 
-function pulseOppFx(socketId, cls) {
+function pulseOppFx(socketId, cls, holdMs) {
   const el = document.getElementById(`opp-wrap-${socketId}`);
   if (!el) return;
   el.classList.remove('panel-fx-out', 'panel-fx-in', 'panel-threat-tick', 'panel-defend-glow', 'panel-attack-queued-victim', 'panel-attack-queued-out');
   void el.offsetWidth;
   el.classList.add(cls);
-  setTimeout(() => el.classList.remove(cls), 450);
+  const ms = holdMs != null && holdMs > 0 ? holdMs : 450;
+  setTimeout(() => el.classList.remove(cls), ms);
 }
 
 // ── 게임 오버 처리 ──
@@ -532,6 +569,12 @@ function escHtml(str) {
 
 function normalizePenaltyPayload(p) {
   if (!p) return { kind: 'rows', lines: 1 };
+  if (p.kind === 'cloud') return { ...p, kind: 'cloud', ms: Math.min(8000, Math.max(1500, parseInt(p.ms, 10) || 4000)) };
+  if (p.kind === 'ink') {
+    const pow = Math.max(1, Math.min(12, parseInt(p.power, 10) || 1));
+    const defInk = Math.min(4800, Math.max(2600, 2400 + pow * 180));
+    return { ...p, kind: 'ink', ms: Math.min(8000, Math.max(1500, parseInt(p.ms, 10) || defInk)) };
+  }
   if (p.kind) return p;
   if (p.lines != null) return { kind: 'rows', lines: p.lines };
   return { kind: 'rows', lines: 1 };
@@ -541,17 +584,52 @@ function penaltyFlashIntensity(pen) {
   if (!pen) return 1;
   const p = pen.power || 1;
   switch (pen.kind) {
-    case 'shower':
-      return Math.min(12, 4 + Math.floor((pen.blocks || 12) / 4));
+    case 'cloud':
+    case 'ink':
+      return Math.min(10, 3 + Math.floor(p / 2));
     case 'meteor':
       return Math.min(10, 2 + (pen.meteors || 1) * 2);
-    case 'columns':
-      return Math.min(10, 1 + (pen.cols || 2) * (pen.depth || 3));
     case 'split':
     case 'cheese':
     case 'rows':
     default:
       return Math.max(1, pen.lines || p);
+  }
+}
+
+/** 구름·먹물 시야 방해 (보드 래퍼 위 오버레이, pointer-events 없음) */
+function runVisionPenaltyFx(pen, boardWrapEl) {
+  if (!boardWrapEl || !pen) return;
+  const kind = pen.kind;
+  if (kind !== 'cloud' && kind !== 'ink') return;
+  const ms =
+    kind === 'cloud'
+      ? Math.min(8000, Math.max(1500, parseInt(pen.ms, 10) || 4000))
+      : Math.min(8000, Math.max(1500, parseInt(pen.ms, 10) || 3200));
+  if (kind === 'cloud') {
+    const el = document.createElement('div');
+    el.className = 'board-vision-cloud';
+    el.setAttribute('aria-hidden', 'true');
+    boardWrapEl.appendChild(el);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => el.classList.add('show'));
+    });
+    setTimeout(() => {
+      el.classList.add('fade');
+      setTimeout(() => el.remove(), 700);
+    }, ms);
+  } else {
+    const el = document.createElement('div');
+    el.className = 'board-vision-ink';
+    el.setAttribute('aria-hidden', 'true');
+    boardWrapEl.appendChild(el);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => el.classList.add('show'));
+    });
+    setTimeout(() => {
+      el.classList.add('fade');
+      setTimeout(() => el.remove(), 550);
+    }, ms);
   }
 }
 
@@ -942,7 +1020,20 @@ socket.on('game:defendFx', (fx) => {
       setTimeout(() => col.classList.remove('defend-pulse'), 900);
     }
   } else {
-    pulseOppFx(fx.to, 'panel-defend-glow');
+    pulseOppFx(fx.to, 'panel-defend-glow', 1020);
+    const ow = document.querySelector(`#opp-wrap-${fx.to} .opp-board-wrap`);
+    if (ow) {
+      ow.classList.remove('defend-shield-burst');
+      void ow.offsetWidth;
+      ow.classList.add('defend-shield-burst');
+      setTimeout(() => ow.classList.remove('defend-shield-burst'), 1100);
+      const pop = document.createElement('div');
+      pop.className = 'defend-absorb-pop defend-absorb-pop-opp';
+      const a = parseInt(fx.absorbed, 10) || 0;
+      pop.textContent = a > 0 ? `−${a}` : '방어!';
+      ow.appendChild(pop);
+      setTimeout(() => pop.remove(), 1000);
+    }
   }
 });
 
@@ -980,6 +1071,8 @@ socket.on('game:garbage', (payload) => {
   const pen = normalizePenaltyPayload(payload);
   if (tetris && tetris.running) {
     runPenaltyLandedVfx();
+    const bw = document.querySelector('#game-screen .board-wrap');
+    if (pen.kind === 'cloud' || pen.kind === 'ink') runVisionPenaltyFx(pen, bw);
     runIncomingPenaltyVfx(pen);
     if (typeof flashAttack === 'function') flashAttack(penaltyFlashIntensity(pen), { kind: pen.kind, incoming: true });
     tetris.applyPenalty(pen);
@@ -992,6 +1085,16 @@ socket.on('game:garbageBot', (payload) => {
   const bot = onlineHostBots[payload.botId];
   if (bot && typeof bot.applyPenalty === 'function') {
     runPenaltyLandedVfx();
+    const bid = String(payload.botId || '');
+    let botWrap = null;
+    if (bid) {
+      try {
+        botWrap = document.querySelector(`#online-bot-root .online-bot-board-wrap[data-bot-id="${CSS.escape(bid)}"]`);
+      } catch (e) {
+        botWrap = document.querySelector(`#online-bot-root .online-bot-board-wrap[data-bot-id="${bid.replace(/["'\\]/g, '')}"]`);
+      }
+    }
+    if (pen.kind === 'cloud' || pen.kind === 'ink') runVisionPenaltyFx(pen, botWrap);
     runIncomingPenaltyVfx(pen);
     if (typeof flashAttack === 'function') flashAttack(penaltyFlashIntensity(pen), { kind: pen.kind, incoming: true });
     bot.applyPenalty(pen);
@@ -1008,6 +1111,7 @@ socket.on('chat:lobby', ({ nickname, msg }) => {
 
 socket.on('chat:room', ({ nickname, msg }) => {
   addChat('room-chat', nickname, msg);
+  addGameLiveChatLine(nickname, msg, false);
 });
 
 socket.on('error', (msg) => {
