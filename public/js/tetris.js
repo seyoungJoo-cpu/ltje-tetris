@@ -91,6 +91,11 @@ class TetrisGame {
 
   stop() { this.running = false; }
 
+  setShowGhost(on) {
+    this.showGhost = !!on;
+    if (this.running) this._draw();
+  }
+
   _spawn() {
     this.current = this.next;
     this.next = this._spawnPiece(this._getFromBag());
@@ -294,8 +299,18 @@ class TetrisGame {
   }
 
   _getState() {
+    let current = null;
+    if (this.current && !this.gameOver) {
+      current = {
+        type: this.current.type,
+        shape: this.current.shape.map((row) => row.map((c) => c)),
+        x: this.current.x,
+        y: this.current.y,
+      };
+    }
     return {
       board: this.board,
+      current,
       score: this.score,
       lines: this.lines,
       level: this.level,
@@ -333,7 +348,7 @@ class TetrisGame {
   }
 }
 
-// 상대방 보드 그리기 (작은 캔버스)
+// 상대방 보드 그리기 (작은 캔버스) — 고정 블록 + 낙하 중 미노
 function drawOpponentBoard(canvas, state) {
   if (!canvas || !state) return;
   const ctx = canvas.getContext('2d');
@@ -347,6 +362,15 @@ function drawOpponentBoard(canvas, state) {
       ctx.fillRect(c * B, r * B, B - 1, B - 1);
     }
   }));
+  if (state.current && !state.over) {
+    const { shape, x, y, type } = state.current;
+    shape.forEach((row, r) => row.forEach((v, c) => {
+      if (v) {
+        ctx.fillStyle = COLORS[type] || '#888';
+        ctx.fillRect((x + c) * B, (y + r) * B, B - 1, B - 1);
+      }
+    }));
+  }
   if (state.over) {
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
     ctx.fillRect(0, 0, COLS * B, ROWS * B);
@@ -354,5 +378,6 @@ function drawOpponentBoard(canvas, state) {
     ctx.font = `bold ${B * 1.2}px Jua, sans-serif`;
     ctx.textAlign = 'center';
     ctx.fillText('OVER', COLS * B / 2, ROWS * B / 2);
+    ctx.textAlign = 'start';
   }
 }

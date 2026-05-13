@@ -18,19 +18,49 @@ const ranking = [];   // [{ nickname, score, lines, date }]
 
 let roomCounter = 1;
 
-function createRoom(hostId, hostNick, maxPlayers) {
+function normalizeGameMode(mode) {
+  if (mode === 'team2') return 'team2';
+  if (mode === 'team3') return 'team3';
+  return 'ffa';
+}
+
+function createRoom(hostId, hostNick, maxPlayers, showGhost = true, gameMode = 'ffa') {
+  const mode = normalizeGameMode(gameMode);
+  const max =
+    mode === 'team2' ? 4
+    : mode === 'team3' ? 6
+    : Math.min(Math.max(parseInt(maxPlayers, 10) || 2, 2), 6);
   const roomId = `room_${roomCounter++}`;
   rooms[roomId] = {
     id: roomId,
     name: `${hostNick}의 방`,
     host: hostId,
-    maxPlayers,
+    maxPlayers: max,
     players: [hostId],
     status: 'waiting',   // waiting | playing | finished
     gameStates: {},      // socketId → board/score state
     readySet: new Set(),
+    showGhost: showGhost !== false,
+    gameMode: mode,
+    playerTeams: {},     // socketId → 0 | 1 (팀전)
   };
   return roomId;
+}
+
+function recomputeTeams(room) {
+  room.playerTeams = {};
+  if (room.gameMode !== 'team2' && room.gameMode !== 'team3') return;
+  const ordered = [...room.players];
+  const half = room.gameMode === 'team2' ? 2 : 3;
+  ordered.forEach((id, i) => {
+    room.playerTeams[id] = i < half ? 0 : 1;
+  });
+}
+
+function roomModeLabel(mode) {
+  if (mode === 'team2') return '2v2';
+  if (mode === 'team3') return '3v3';
+  return 'FFA';
 }
 
 function getRoomList() {
@@ -40,6 +70,8 @@ function getRoomList() {
     players: r.players.length,
     maxPlayers: r.maxPlayers,
     status: r.status,
+    gameMode: r.gameMode || 'ffa',
+    modeLabel: roomModeLabel(r.gameMode || 'ffa'),
   }));
 }
 
@@ -59,14 +91,56 @@ function removePlayerFromRoom(socketId) {
     // 방장 교체
     if (room.host === socketId) room.host = room.players[0];
 
-    // 게임 중이었으면 남은 사람 승리처리
+    // 게임 중이었으면 남은 사람/팀 승리처리
     if (room.status === 'playing') {
-      if (room.players.length === 1) {
+      recomputeTeams(room);
+      const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
+      if (isTeam) {
+        const alive0 = room.players.filter(
+          id => room.playerTeams[id] === 0 && !room.gameStates[id]?.over
+        );
+        const alive1 = room.players.filter(
+          id => room.playerTeams[id] === 1 && !room.gameStates[id]?.over
+        );
+        if (alive0.length === 0 && alive1.length > 0) {
+          const rep = alive1[0];
+          io.to(p.roomId).emit('game:over', {
+            winnerId: rep,
+            winnerNick: '🅱 팀 B 승리!',
+            winnerTeam: 1,
+            isTeamGame: true,
+            reason: '상대방 접속 종료',
+          });
+          room.status = 'waiting';
+          room.readySet.clear();
+          room.gameStates = {};
+        } else if (alive1.length === 0 && alive0.length > 0) {
+          const rep = alive0[0];
+          io.to(p.roomId).emit('game:over', {
+            winnerId: rep,
+            winnerNick: '🅰 팀 A 승리!',
+            winnerTeam: 0,
+            isTeamGame: true,
+            reason: '상대방 접속 종료',
+          });
+          room.status = 'waiting';
+          room.readySet.clear();
+          room.gameStates = {};
+        } else if (room.players.length === 1) {
+          const winnerId = room.players[0];
+          const winnerNick = players[winnerId]?.nickname || '?';
+          io.to(p.roomId).emit('game:over', { winnerId, winnerNick, reason: '상대방 접속 종료' });
+          room.status = 'waiting';
+          room.readySet.clear();
+          room.gameStates = {};
+        }
+      } else if (room.players.length === 1) {
         const winnerId = room.players[0];
         const winnerNick = players[winnerId]?.nickname || '?';
         io.to(p.roomId).emit('game:over', { winnerId, winnerNick, reason: '상대방 접속 종료' });
         room.status = 'waiting';
         room.readySet.clear();
+        room.gameStates = {};
       }
     }
     io.to(p.roomId).emit('room:update', sanitizeRoom(room));
@@ -76,6 +150,11 @@ function removePlayerFromRoom(socketId) {
 }
 
 function sanitizeRoom(room) {
+  recomputeTeams(room);
+  const teams =
+    room.gameMode === 'ffa'
+      ? undefined
+      : Object.fromEntries(room.players.map((id) => [id, room.playerTeams[id] ?? 0]));
   return {
     id: room.id,
     name: room.name,
@@ -87,6 +166,9 @@ function sanitizeRoom(room) {
       ready: room.readySet.has(id),
     })),
     status: room.status,
+    showGhost: !!room.showGhost,
+    gameMode: room.gameMode || 'ffa',
+    teams,
   };
 }
 
@@ -94,6 +176,23 @@ function addRanking(nickname, score, lines) {
   ranking.push({ nickname, score, lines, date: new Date().toLocaleDateString('ko-KR') });
   ranking.sort((a, b) => b.score - a.score);
   if (ranking.length > 50) ranking.length = 50;
+}
+
+function pickGarbageTarget(room, attackerId) {
+  const others = room.players.filter((id) => id !== attackerId);
+  let pool;
+  if (room.gameMode === 'team2' || room.gameMode === 'team3') {
+    const myTeam = room.playerTeams[attackerId];
+    pool = others.filter(
+      (id) =>
+        room.playerTeams[id] !== myTeam &&
+        !room.gameStates[id]?.over
+    );
+  } else {
+    pool = others.filter((id) => !room.gameStates[id]?.over);
+  }
+  if (pool.length === 0) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 // ── Socket.io ──────────────────────────────────────────────
@@ -109,15 +208,27 @@ io.on('connection', (socket) => {
   });
 
   // 방 만들기
-  socket.on('room:create', ({ maxPlayers }) => {
+  socket.on('room:create', ({ maxPlayers, showGhost, gameMode }) => {
     if (players[socket.id].roomId) return;
     const nick = players[socket.id].nickname;
-    const max = Math.min(Math.max(parseInt(maxPlayers) || 2, 2), 6);
-    const roomId = createRoom(socket.id, nick, max);
+    const mode = normalizeGameMode(gameMode);
+    const maxReq = mode === 'ffa' ? Math.min(Math.max(parseInt(maxPlayers, 10) || 2, 2), 6) : (mode === 'team2' ? 4 : 6);
+    const ghostOpt = showGhost === false ? false : true;
+    const roomId = createRoom(socket.id, nick, maxReq, ghostOpt, mode);
     players[socket.id].roomId = roomId;
     socket.join(roomId);
     socket.emit('room:joined', sanitizeRoom(rooms[roomId]));
     io.emit('lobby:rooms', getRoomList());
+  });
+
+  // 방장 전용: 쉐도우(고스트) 모드 — 방 전원 동기화
+  socket.on('room:showGhost', (showGhost) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.host !== socket.id) return;
+    room.showGhost = !!showGhost;
+    io.to(p.roomId).emit('room:update', sanitizeRoom(room));
   });
 
   // 방 참가
@@ -155,14 +266,19 @@ io.on('connection', (socket) => {
 
     io.to(p.roomId).emit('room:update', sanitizeRoom(room));
 
-    // 방장 포함 모두 레디 && 2명 이상
-    const allReady = room.players.length >= 2 &&
+    recomputeTeams(room);
+    const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
+    const needFull = isTeam ? room.players.length === room.maxPlayers : room.players.length >= 2;
+    const allReady = needFull &&
       room.players.every(id => room.readySet.has(id));
 
     if (allReady) {
       room.status = 'playing';
       room.gameStates = {};
       io.to(p.roomId).emit('game:start', {
+        showGhost: !!room.showGhost,
+        gameMode: room.gameMode || 'ffa',
+        teams: isTeam ? { ...room.playerTeams } : undefined,
         players: room.players.map(id => ({
           id,
           nickname: players[id]?.nickname || '?',
@@ -182,11 +298,25 @@ io.on('connection', (socket) => {
     socket.to(p.roomId).emit('game:opponent', { id: socket.id, state });
   });
 
-  // 훼방 블록 전송
+  // 훼방 블록 — 1:1은 상대 1명, 그 외·팀전은 랜덤 1명(적 팀만)
   socket.on('game:attack', ({ lines }) => {
     const p = players[socket.id];
-    if (!p.roomId) return;
-    socket.to(p.roomId).emit('game:garbage', { from: socket.id, lines });
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.status !== 'playing') return;
+    const n = Math.max(1, Math.min(12, parseInt(lines, 10) || 1));
+    const targetId = pickGarbageTarget(room, socket.id);
+    if (!targetId) return;
+    const fromNick = players[socket.id]?.nickname || '?';
+    const toNick = players[targetId]?.nickname || '?';
+    io.to(targetId).emit('game:garbage', { from: socket.id, lines: n });
+    io.to(p.roomId).emit('game:attackFx', {
+      from: socket.id,
+      to: targetId,
+      lines: n,
+      fromNick,
+      toNick,
+    });
   });
 
   // 게임 오버 (본인)
@@ -200,15 +330,54 @@ io.on('connection', (socket) => {
     addRanking(nick, score, lines);
     io.emit('ranking:update', ranking.slice(0, 20));
 
-    // 살아있는 플레이어 확인
-    const alive = room.players.filter(id => {
-      const gs = room.gameStates[id];
-      return id !== socket.id && !(gs?.over);
-    });
+    room.gameStates[socket.id] = Object.assign({}, room.gameStates[socket.id], { over: true });
 
-    if (room.gameStates[socket.id]) room.gameStates[socket.id].over = true;
+    recomputeTeams(room);
+    const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
 
-    // 살아남은 한명이면 게임 종료
+    if (isTeam) {
+      const alive0 = room.players.filter(
+        (id) => room.playerTeams[id] === 0 && !room.gameStates[id]?.over
+      );
+      const alive1 = room.players.filter(
+        (id) => room.playerTeams[id] === 1 && !room.gameStates[id]?.over
+      );
+      if (alive0.length === 0 && alive1.length > 0) {
+        const rep = alive1[0];
+        io.to(p.roomId).emit('game:over', {
+          winnerId: rep,
+          winnerNick: '🅱 팀 B 승리!',
+          winnerTeam: 1,
+          isTeamGame: true,
+          reason: '게임 종료',
+        });
+        room.status = 'waiting';
+        room.readySet.clear();
+        room.gameStates = {};
+        io.emit('lobby:rooms', getRoomList());
+        io.to(p.roomId).emit('room:update', sanitizeRoom(room));
+        return;
+      }
+      if (alive1.length === 0 && alive0.length > 0) {
+        const rep = alive0[0];
+        io.to(p.roomId).emit('game:over', {
+          winnerId: rep,
+          winnerNick: '🅰 팀 A 승리!',
+          winnerTeam: 0,
+          isTeamGame: true,
+          reason: '게임 종료',
+        });
+        room.status = 'waiting';
+        room.readySet.clear();
+        room.gameStates = {};
+        io.emit('lobby:rooms', getRoomList());
+        io.to(p.roomId).emit('room:update', sanitizeRoom(room));
+        return;
+      }
+      return;
+    }
+
+    // FFA: 살아남은 한명이면 게임 종료
     const aliveAll = room.players.filter(id => !room.gameStates[id]?.over);
     if (aliveAll.length <= 1) {
       const winnerId = aliveAll[0] || null;

@@ -58,6 +58,23 @@ canvas { touch-action: none; }
 .stat-value{font-family:'Jua',sans-serif;font-size:1.3rem;color:var(--accent);}
 .attack-flash{position:absolute;inset:0;background:rgba(255,64,129,.3);pointer-events:none;opacity:0;transition:opacity .1s;}
 .attack-flash.show{opacity:1;}
+.attack-flash.strong{background:linear-gradient(180deg,rgba(255,23,68,.55),rgba(156,39,176,.35));}
+.board-wrap.board-fx-out{animation:boardOutFx .45s ease;}
+@keyframes boardOutFx{0%{box-shadow:0 0 0 0 rgba(255,64,129,0)}40%{box-shadow:0 0 28px 4px rgba(255,64,129,.75)}100%{box-shadow:0 0 20px rgba(0,229,255,.3)}}
+.opponent-panel-wrap{border-radius:12px;padding:4px;transition:box-shadow .15s,transform .15s;}
+.opponent-panel-wrap.panel-fx-out{box-shadow:0 0 22px rgba(255,64,129,.9);animation:panelPop .4s ease;}
+.opponent-panel-wrap.panel-fx-in{box-shadow:0 0 26px rgba(255,23,68,.95);animation:panelShake .38s ease;}
+.opponent-panel-wrap.teammate .opp-canvas{border-color:var(--green);box-shadow:0 0 10px rgba(0,230,118,.25);}
+@keyframes panelPop{0%{transform:scale(1)}35%{transform:scale(1.03)}100%{transform:scale(1)}}
+@keyframes panelShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-4px)}40%{transform:translateX(4px)}60%{transform:translateX(-3px)}80%{transform:translateX(3px)}}
+.player-card.team-a{border-color:rgba(0,229,255,.35);}
+.player-card.team-b{border-color:rgba(255,64,129,.35);}
+.player-team-tag{font-size:.65rem;padding:2px 8px;border-radius:10px;margin-top:2px;font-weight:700;}
+.player-team-tag.ta{background:rgba(0,229,255,.12);color:var(--accent);}
+.player-team-tag.tb{background:rgba(255,64,129,.12);color:var(--accent2);}
+#game-screen.screen-shake{animation:screenShake .42s ease;}
+@keyframes screenShake{0%,100%{transform:translate(0,0)}15%{transform:translate(-5px,2px)}30%{transform:translate(5px,-2px)}45%{transform:translate(-4px,-1px)}60%{transform:translate(4px,1px)}75%{transform:translate(-2px,0)}}
+.room-mode-tag{font-size:.68rem;color:var(--text-dim);margin-top:2px;}
 .panel-title{font-family:'Jua',sans-serif;font-size:1rem;color:var(--accent);letter-spacing:1px;}
 .chat-messages{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px;font-size:.8rem;}
 .chat-msg{word-break:break-all;}
@@ -446,7 +463,22 @@ canvas { touch-action: none; }
     <button class="btn btn-danger btn-sm" onclick="leaveRoom()">나가기</button>
   </div>
   <div class="room-body">
-    <div class="room-left"><div id="room-players"></div></div>
+    <div class="room-left">
+      <div id="room-players"></div>
+      <div class="option-row room-ghost-row" style="margin-top:12px;">
+        <label class="toggle-label" for="room-live-ghost-check">
+          <span class="toggle-icon">👻</span>
+          <span class="toggle-text">
+            <b>쉐도우 모드</b>
+            <small>방장만 변경 · 전원 동일 적용</small>
+          </span>
+          <div class="toggle-wrap">
+            <input type="checkbox" id="room-live-ghost-check" checked>
+            <span class="toggle-slider"></span>
+          </div>
+        </label>
+      </div>
+    </div>
     <div class="room-right">
       <div class="room-chat">
         <div class="panel-title" style="font-size:.88rem;">💬 방 채팅</div>
@@ -466,6 +498,19 @@ canvas { touch-action: none; }
     <div class="logo logo-sm">테트리스</div>
     <div class="spacer"></div>
     <div id="game-room-name" style="color:var(--text-dim);font-size:.85rem;"></div>
+    <div class="option-row game-ghost-row" style="margin:0;padding:0;border:none;background:transparent;">
+      <label class="toggle-label" for="game-live-ghost-check" style="padding:4px 8px;">
+        <span class="toggle-icon" style="font-size:1rem;">👻</span>
+        <span class="toggle-text" style="min-width:0;">
+          <b style="font-size:.78rem;">쉐도우</b>
+          <small style="font-size:.62rem;">방장 설정</small>
+        </span>
+        <div class="toggle-wrap">
+          <input type="checkbox" id="game-live-ghost-check" checked>
+          <span class="toggle-slider"></span>
+        </div>
+      </label>
+    </div>
   </div>
   <div class="game-body">
     <div class="game-stats">
@@ -498,14 +543,22 @@ canvas { touch-action: none; }
 <div class="modal-overlay" id="create-modal">
   <div class="modal">
     <h2>방 만들기</h2>
-    <label>최대 인원</label>
-    <select id="max-players-select">
-      <option value="2">2명 (1vs1)</option>
-      <option value="3">3명</option>
-      <option value="4">4명</option>
-      <option value="5">5명</option>
-      <option value="6">6명</option>
+    <label>게임 유형</label>
+    <select id="room-game-mode">
+      <option value="ffa">자유 대전 (FFA)</option>
+      <option value="team2">2 vs 2 팀전</option>
+      <option value="team3">3 vs 3 팀전</option>
     </select>
+    <div id="max-players-wrap">
+      <label>최대 인원</label>
+      <select id="max-players-select">
+        <option value="2">2명 (1vs1)</option>
+        <option value="3">3명</option>
+        <option value="4">4명</option>
+        <option value="5">5명</option>
+        <option value="6">6명</option>
+      </select>
+    </div>
     <!-- 쉐도우 옵션 -->
     <div class="option-row">
       <label class="toggle-label" for="room-ghost-check">
@@ -591,14 +644,18 @@ function vsBackToSelect() {
   }
 }
 
-// VS 화면용 attack flash
-function flashAttack() {
+// VS 화면용 attack flash (lines: 훼방 줄 수 — 세기 조절)
+function flashAttack(lines, opts) {
+  const subtle = opts && opts.subtle;
+  const n = Math.max(1, parseInt(lines, 10) || 1);
+  const ms = subtle ? 70 : Math.min(480, 100 + n * 95);
   const ids = ['vs-attack-flash', 'attack-flash'];
   ids.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
+      el.classList.toggle('strong', !subtle && n >= 2);
       el.classList.add('show');
-      setTimeout(() => el.classList.remove('show'), 200);
+      setTimeout(() => el.classList.remove('show', 'strong'), ms);
     }
   });
 }
