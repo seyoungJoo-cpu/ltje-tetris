@@ -35,7 +35,8 @@ function spawnHostAiBots(playersList) {
     c.width = cw;
     c.height = ch;
     root.appendChild(c);
-    const stage = Math.min(7, Math.max(1, parseInt(p.stage, 10) || 3));
+    const ps = parseInt(p.stage, 10);
+    const stage = Number.isFinite(ps) && ps >= 1 && ps <= 7 ? ps : (3 + Math.floor(Math.random() * 4));
     const bot = new AIBot(
       c,
       null,
@@ -51,11 +52,21 @@ function spawnHostAiBots(playersList) {
           drawOpponentBoard(opponentCanvases[p.id], state);
         }
       },
-      { thinkCapMs: 380 }
+      { thinkCapMs: 380, onLock: (cleared) => { socket.emit('game:botLock', { botId: p.id, cleared }); } }
     );
     onlineHostBots[p.id] = bot;
     bot.start();
   });
+}
+
+function pickBotStageForRoom() {
+  const raw = document.getElementById('room-bot-stage')?.value;
+  if (raw === 'random' || raw === '' || raw == null) {
+    return 3 + Math.floor(Math.random() * 4);
+  }
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n >= 1 && n <= 7) return n;
+  return 3 + Math.floor(Math.random() * 4);
 }
 
 // ── 닉네임 입력 → 로비 진입 ──
@@ -287,14 +298,14 @@ document.getElementById('room-players')?.addEventListener('change', (e) => {
 document.getElementById('room-host-panel')?.addEventListener('click', (e) => {
   const ffaAdd = e.target.closest('[data-add-bot-ffa]');
   if (ffaAdd && myRoomData?.host === socket.id) {
-    const stage = parseInt(document.getElementById('room-bot-stage')?.value, 10) || 3;
+    const stage = pickBotStageForRoom();
     socket.emit('room:addBot', { team: 0, stage });
     return;
   }
   const add = e.target.closest('[data-add-bot]');
   if (!add || myRoomData?.host !== socket.id) return;
   const team = parseInt(add.dataset.addBot, 10);
-  const stage = parseInt(document.getElementById('room-bot-stage')?.value, 10) || 3;
+  const stage = pickBotStageForRoom();
   socket.emit('room:addBot', { team, stage });
 });
 
@@ -351,6 +362,10 @@ function createOppPanelWrap(p, isMate) {
   wrap.innerHTML = `
     <div class="opponent-panel">
       <div class="player-label">${escHtml(p.nickname)}${p.isBot ? ' 🤖' : ''}</div>
+      <div class="opp-threat-chip" style="display:none" title="대기 중인 훼방">
+        <span class="oth-pwr">0</span>
+        <span class="oth-locks">0/3</span>
+      </div>
       <canvas class="opp-canvas" id="opp-${p.id}" width="${cw}" height="${ch}"></canvas>
     </div>`;
   opponentCanvases[p.id] = wrap.querySelector('canvas');
@@ -389,6 +404,7 @@ function startGame(players, showGhost) {
   showScreen('game-screen');
   document.getElementById('my-label').textContent = myNickname;
   document.getElementById('game-room-name').textContent = myRoomData?.name || '';
+  clearIncomingThreatUi();
 
   opponentCanvases = {};
   const oppPanel = document.getElementById('opponents-panel');
@@ -420,6 +436,8 @@ function startGame(players, showGhost) {
       document.getElementById('score-display').textContent = state.score.toLocaleString();
       document.getElementById('lines-display').textContent = state.lines;
       document.getElementById('level-display').textContent = state.level;
+      const oc = document.getElementById('online-combo-display');
+      if (oc) oc.textContent = state.combo != null ? String(state.combo) : '0';
       const ms = document.getElementById('online-m-score'); if (ms) ms.textContent = state.score.toLocaleString();
       const ml = document.getElementById('online-m-lines'); if (ml) ml.textContent = state.lines;
       const mv = document.getElementById('online-m-level'); if (mv) mv.textContent = state.level;
@@ -435,7 +453,11 @@ function startGame(players, showGhost) {
     (score, lines) => {
       socket.emit('game:myover', { score, lines });
     },
-    { showGhost: ghostOpt }
+    { showGhost: ghostOpt, onLock: (cleared) => { socket.emit('game:lock', { cleared }); },
+      onLineClear: (p) => {
+        if (typeof runLineClearBoardFx === 'function') runLineClearBoardFx(document.getElementById('my-canvas'), p);
+      },
+    }
   );
   tetris.start();
   if (myRoomData) syncRoomShowGhost(myRoomData);
@@ -445,7 +467,7 @@ function startGame(players, showGhost) {
 function pulseOppFx(socketId, cls) {
   const el = document.getElementById(`opp-wrap-${socketId}`);
   if (!el) return;
-  el.classList.remove('panel-fx-out', 'panel-fx-in');
+  el.classList.remove('panel-fx-out', 'panel-fx-in', 'panel-threat-tick', 'panel-defend-glow', 'panel-attack-queued-victim', 'panel-attack-queued-out');
   void el.offsetWidth;
   el.classList.add(cls);
   setTimeout(() => el.classList.remove(cls), 450);
@@ -456,6 +478,7 @@ function showGameOver(payload) {
   const { winnerId, winnerNick, reason, isTeamGame, winnerTeam } = payload;
   stopHostOnlineBots();
   if (tetris) tetris.stop();
+  clearIncomingThreatUi();
   const overlay = document.getElementById('gameover-overlay');
   const title = document.getElementById('gameover-title');
   const info = document.getElementById('gameover-info');
@@ -537,6 +560,99 @@ function resolveAttackFxAnchor(id) {
   return document.getElementById('opp-wrap-' + id);
 }
 
+function resolveIncomingQueueAnchor(targetId) {
+  const gs = document.getElementById('game-screen');
+  if (!gs || !gs.classList.contains('active')) return null;
+  if (targetId === socket.id) {
+    return document.getElementById('incoming-threat-column');
+  }
+  const wrap = document.getElementById('opp-wrap-' + targetId);
+  if (!wrap) return null;
+  return wrap.querySelector('.opp-threat-chip') || wrap.querySelector('.opponent-panel') || wrap;
+}
+
+/** 훼방 큐(대기열) 위치로 수렴하는 링·불꽃 */
+function spawnAttackQueueSurgeRings(targetId) {
+  const el = resolveIncomingQueueAnchor(targetId);
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2) return;
+  const cx = r.left + r.width / 2;
+  const cy = r.top + Math.min(r.height * 0.55, r.height * 0.5 + 6);
+  const root = ensureAttackFxRoot();
+  for (let i = 0; i < 5; i++) {
+    const ring = document.createElement('div');
+    ring.className = 'attack-queue-surge-ring';
+    ring.style.left = `${cx}px`;
+    ring.style.top = `${cy}px`;
+    ring.style.animationDelay = `${i * 0.07}s`;
+    root.appendChild(ring);
+    setTimeout(() => ring.remove(), 950);
+  }
+  const sparks = 18;
+  for (let s = 0; s < sparks; s++) {
+    const sp = document.createElement('div');
+    sp.className = 'attack-queue-ember';
+    const ang = (s / sparks) * Math.PI * 2 + Math.random() * 0.4;
+    const rad = 18 + Math.random() * 48;
+    sp.style.setProperty('--ex', `${(Math.cos(ang) * rad).toFixed(1)}px`);
+    sp.style.setProperty('--ey', `${(Math.sin(ang) * rad * 0.65).toFixed(1)}px`);
+    sp.style.left = `${cx}px`;
+    sp.style.top = `${cy}px`;
+    sp.style.animationDelay = `${s * 0.025}s`;
+    root.appendChild(sp);
+    setTimeout(() => sp.remove(), 720);
+  }
+}
+
+/** 훼방이 지연 큐에 쌓일 때 — 곡선이 큐 UI로 들어가고 링·불꽃 수렴 */
+function runAttackQueuedVfx(data) {
+  if (!data || data.targetId == null || data.fromId == null) return;
+  const gs = document.getElementById('game-screen');
+  const gameActive = gs && gs.classList.contains('active');
+  const qEl = resolveIncomingQueueAnchor(data.targetId);
+  if (typeof runAttackTrail === 'function' && gameActive) {
+    runAttackTrail({
+      from: data.fromId,
+      to: data.targetId,
+      lines: Math.max(1, data.power | 0),
+      kind: 'meteor',
+      fromNick: `훼방 +${data.power | 0}`,
+      toNick: `큐 ${data.queueLen || 1}건`,
+      toCustomEl: qEl || undefined,
+    });
+  }
+  spawnAttackQueueSurgeRings(data.targetId);
+  if (!gameActive) return;
+  if (data.targetId === socket.id) {
+    const col = document.getElementById('incoming-threat-column');
+    if (col) {
+      col.classList.remove('attack-queued-victim-pulse', 'queue-fx-surge-target');
+      void col.offsetWidth;
+      col.classList.add('attack-queued-victim-pulse', 'queue-fx-surge-target');
+      setTimeout(() => {
+        col.classList.remove('attack-queued-victim-pulse', 'queue-fx-surge-target');
+      }, 1100);
+    }
+    const bwHit = document.querySelector('#game-screen .board-wrap');
+    if (bwHit) {
+      bwHit.classList.add('attack-queued-board-hit');
+      setTimeout(() => bwHit.classList.remove('attack-queued-board-hit'), 720);
+    }
+  }
+  if (data.fromId === socket.id) {
+    const bwOut = document.querySelector('#game-screen .board-wrap');
+    if (bwOut) {
+      bwOut.classList.remove('attack-queued-outburst');
+      void bwOut.offsetWidth;
+      bwOut.classList.add('attack-queued-outburst');
+      setTimeout(() => bwOut.classList.remove('attack-queued-outburst'), 680);
+    }
+  }
+  pulseOppFx(data.targetId, 'panel-attack-queued-victim');
+  pulseOppFx(data.fromId, 'panel-attack-queued-out');
+}
+
 function ensureAttackFxRoot() {
   let root = document.getElementById('attack-fx-root');
   if (!root) {
@@ -558,9 +674,9 @@ function quadAttackPoint(p0, pc, p1, t) {
 function runAttackTrail(fx) {
   const gs = document.getElementById('game-screen');
   if (!gs?.classList.contains('active')) return;
-  const { from, to, lines, kind, fromNick, toNick } = fx;
+  const { from, to, lines, kind, fromNick, toNick, toCustomEl } = fx;
   const fromEl = resolveAttackFxAnchor(from);
-  const toEl = resolveAttackFxAnchor(to);
+  const toEl = (toCustomEl != null && toCustomEl instanceof Element) ? toCustomEl : resolveAttackFxAnchor(to);
   if (!fromEl || !toEl) return;
   const a = fromEl.getBoundingClientRect();
   const b = toEl.getBoundingClientRect();
@@ -658,6 +774,47 @@ function runAttackTrail(fx) {
   }, 1100);
 }
 
+function runPenaltyLandedVfx() {
+  const gs = document.getElementById('game-screen');
+  if (!gs?.classList.contains('active')) return;
+  gs.classList.remove('screen-shake', 'screen-shake-hard', 'screen-hit-mega');
+  void gs.offsetWidth;
+  gs.classList.add('screen-hit-mega');
+  setTimeout(() => gs.classList.remove('screen-hit-mega'), 1100);
+
+  const row = gs.querySelector('.my-game-board-row');
+  if (row) {
+    row.classList.remove('penalty-landed-row-rattle');
+    void row.offsetWidth;
+    row.classList.add('penalty-landed-row-rattle');
+    setTimeout(() => row.classList.remove('penalty-landed-row-rattle'), 940);
+  }
+
+  const col = document.getElementById('incoming-threat-column');
+  if (col) {
+    col.classList.remove('threat-column-hit-rattle');
+    void col.offsetWidth;
+    col.classList.add('threat-column-hit-rattle');
+    setTimeout(() => col.classList.remove('threat-column-hit-rattle'), 900);
+  }
+
+  let ov = document.getElementById('penalty-hit-fullflash');
+  if (ov) ov.remove();
+  ov = document.createElement('div');
+  ov.id = 'penalty-hit-fullflash';
+  ov.setAttribute('aria-hidden', 'true');
+  ov.className = 'penalty-hit-fullflash';
+  gs.appendChild(ov);
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => ov.classList.add('show'));
+  });
+  setTimeout(() => {
+    ov.classList.remove('show');
+    ov.classList.add('fade-out');
+    setTimeout(() => ov.remove(), 520);
+  }, 320);
+}
+
 function runIncomingPenaltyVfx(penalty) {
   const bw = document.querySelector('#game-screen .board-wrap');
   if (!bw) return;
@@ -669,7 +826,60 @@ function runIncomingPenaltyVfx(penalty) {
   setTimeout(() => {
     bw.classList.remove('penalty-hit-vfx');
     bw.removeAttribute('data-pen-kind');
-  }, 950);
+  }, 1100);
+}
+
+function clearIncomingThreatUi() {
+  const col = document.getElementById('incoming-threat-column');
+  const stack = document.getElementById('incoming-threat-stack');
+  if (col) {
+    col.classList.remove('has-threat', 'threat-danger-flash', 'threat-imminent', 'defend-pulse', 'threat-column-hit-rattle');
+  }
+  if (stack) stack.innerHTML = '';
+  document.querySelectorAll('.opp-threat-chip').forEach((el) => {
+    el.style.display = 'none';
+  });
+}
+
+function renderIncomingThreatUi(payload) {
+  if (!payload || payload.targetId == null) return;
+  const { targetId, queue, locksMax } = payload;
+  const max = locksMax || 3;
+  if (targetId === socket.id) {
+    const col = document.getElementById('incoming-threat-column');
+    const stack = document.getElementById('incoming-threat-stack');
+    if (col && stack) {
+      col.classList.toggle('has-threat', queue.length > 0);
+      stack.innerHTML = queue
+        .map((item, idx) => {
+          const orbs = Array.from({ length: max }, (_, i) => (
+            `<span class="lock-orb ${i < item.locksLeft ? 'lit' : 'dim'}"></span>`
+          )).join('');
+          return `<div class="threat-card ${idx === 0 ? 'threat-card-head' : ''}" style="--i:${idx}">
+          <div class="threat-card-glow"></div>
+          <div class="tc-inner">
+            <div class="tc-pwr">${item.power}</div>
+            <div class="tc-sublabel">한 줄이면 막기</div>
+            <div class="tc-lock-orbs">${orbs}</div>
+          </div>
+        </div>`;
+        })
+        .join('');
+    }
+  }
+  const wrap = document.getElementById(`opp-wrap-${targetId}`);
+  if (wrap) {
+    const chip = wrap.querySelector('.opp-threat-chip');
+    if (chip) {
+      if (!queue.length) chip.style.display = 'none';
+      else {
+        chip.style.display = 'flex';
+        const head = queue[0];
+        chip.querySelector('.oth-pwr').textContent = String(head.power);
+        chip.querySelector('.oth-locks').textContent = `${head.locksLeft}/${max}`;
+      }
+    }
+  }
 }
 
 // ── 소켓 이벤트 ──
@@ -705,30 +915,61 @@ socket.on('game:opponent', ({ id, state }) => {
   drawOpponentBoard(opponentCanvases[id], state);
 });
 
+socket.on('game:incomingUpdate', (p) => {
+  renderIncomingThreatUi(p);
+});
+
+socket.on('game:attackQueued', (data) => {
+  runAttackQueuedVfx(data);
+});
+
+socket.on('game:defendFx', (fx) => {
+  const bw = document.querySelector('#game-screen .board-wrap');
+  if (fx.to === socket.id && bw) {
+    bw.classList.remove('defend-shield-burst');
+    void bw.offsetWidth;
+    bw.classList.add('defend-shield-burst');
+    setTimeout(() => bw.classList.remove('defend-shield-burst'), 1100);
+    const pop = document.createElement('div');
+    pop.className = 'defend-absorb-pop';
+    const a = parseInt(fx.absorbed, 10) || 0;
+    pop.textContent = a > 0 ? `−${a}` : '방어!';
+    bw.appendChild(pop);
+    setTimeout(() => pop.remove(), 1000);
+    const col = document.getElementById('incoming-threat-column');
+    if (col) {
+      col.classList.add('defend-pulse');
+      setTimeout(() => col.classList.remove('defend-pulse'), 900);
+    }
+  } else {
+    pulseOppFx(fx.to, 'panel-defend-glow');
+  }
+});
+
+socket.on('game:threatTick', (t) => {
+  if (t.targetId === socket.id) {
+    const col = document.getElementById('incoming-threat-column');
+    if (col) {
+      col.classList.add('threat-danger-flash');
+      if (t.imminent) col.classList.add('threat-imminent');
+      setTimeout(() => {
+        col.classList.remove('threat-danger-flash', 'threat-imminent');
+      }, 520);
+    }
+  }
+  pulseOppFx(t.targetId, 'panel-threat-tick');
+});
+
 socket.on('game:attackFx', (fx) => {
   const { from, to, lines, kind } = fx;
   pulseOppFx(from, 'panel-fx-out');
   pulseOppFx(to, 'panel-fx-in');
-  runAttackTrail(fx);
-  const gs = document.getElementById('game-screen');
-  if (gs?.classList.contains('active')) {
-    gs.classList.remove('screen-quake');
-    void gs.offsetWidth;
-    gs.classList.add('screen-quake');
-    setTimeout(() => gs.classList.remove('screen-quake'), 920);
-  }
   const bw = document.querySelector('#game-screen .board-wrap');
   if (from === socket.id && bw) {
     bw.classList.remove('board-fx-out');
     void bw.offsetWidth;
     bw.classList.add('board-fx-out');
     setTimeout(() => bw.classList.remove('board-fx-out'), 520);
-  }
-  if (to === socket.id && bw) {
-    bw.classList.remove('board-fx-in-hit');
-    void bw.offsetWidth;
-    bw.classList.add('board-fx-in-hit');
-    setTimeout(() => bw.classList.remove('board-fx-in-hit'), 480);
   }
   if (typeof flashAttack === 'function' && to !== socket.id && from !== socket.id) {
     flashAttack(lines, { subtle: true, kind });
@@ -738,18 +979,10 @@ socket.on('game:attackFx', (fx) => {
 socket.on('game:garbage', (payload) => {
   const pen = normalizePenaltyPayload(payload);
   if (tetris && tetris.running) {
+    runPenaltyLandedVfx();
     runIncomingPenaltyVfx(pen);
     if (typeof flashAttack === 'function') flashAttack(penaltyFlashIntensity(pen), { kind: pen.kind, incoming: true });
     tetris.applyPenalty(pen);
-    const gs = document.getElementById('game-screen');
-    if (gs) {
-      gs.classList.add('screen-shake');
-      gs.classList.add('screen-shake-hard');
-      setTimeout(() => {
-        gs.classList.remove('screen-shake');
-        gs.classList.remove('screen-shake-hard');
-      }, 520);
-    }
   }
 });
 
@@ -758,6 +991,7 @@ socket.on('game:garbageBot', (payload) => {
   const pen = normalizePenaltyPayload(payload);
   const bot = onlineHostBots[payload.botId];
   if (bot && typeof bot.applyPenalty === 'function') {
+    runPenaltyLandedVfx();
     runIncomingPenaltyVfx(pen);
     if (typeof flashAttack === 'function') flashAttack(penaltyFlashIntensity(pen), { kind: pen.kind, incoming: true });
     bot.applyPenalty(pen);

@@ -161,7 +161,7 @@ function injectTouchController() {
       #vs-my-canvas, #solo-my-canvas, #my-canvas {
         width: 180px !important; height: 360px !important;
       }
-      #vs-ai-canvas { width: 104px !important; height: 208px !important; }
+      #vs-ai-canvas { width: 120px !important; height: 240px !important; }
       .opponents { flex-direction: row !important; flex-wrap: wrap !important; justify-content: center !important; }
       .vs-player-panel { flex-direction: row !important; align-items: flex-start !important; gap: 12px !important; }
       /* 모바일 미니 스탯바 */

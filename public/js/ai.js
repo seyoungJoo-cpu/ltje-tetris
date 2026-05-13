@@ -2,6 +2,9 @@
 // 난이도별로 다른 전략 파라미터를 사용하는 AI 봇
 'use strict';
 
+// AI 반응·이동 간격 배율 (1보다 클수록 느림)
+const AI_TEMPO_SCALE = 3.0;
+
 // AI 난이도 프로파일
 const AI_PROFILES = {
   // 스테이지 1~2: 멍청하게 플레이 (랜덤 실수 많음)
@@ -94,6 +97,8 @@ class AIBot {
     this.onStateChange = onStateChange;
     this.botOpts = botOpts || {};
     this.thinkCapMs = this.botOpts.thinkCapMs != null ? this.botOpts.thinkCapMs : null;
+    this.onLock = typeof this.botOpts.onLock === 'function' ? this.botOpts.onLock : null;
+    this.onLineClear = typeof this.botOpts.onLineClear === 'function' ? this.botOpts.onLineClear : null;
 
     this.board = this._emptyBoard();
     this.current = null;
@@ -113,6 +118,7 @@ class AIBot {
     this.animFrame = null;
     this.lastTime = 0;
     this.dropAccum = 0;
+    this.comboCount = 0;
   }
 
   _emptyBoard() {
@@ -142,6 +148,7 @@ class AIBot {
     this.pendingX = 0;
     this.moveStepAccum = 0;
     this.dropAccum = 0;
+    this.comboCount = 0;
     this.next = this._spawnPiece(this._getFromBag());
     this._spawn();
     this.lastTime = performance.now();
@@ -150,20 +157,34 @@ class AIBot {
 
   stop() {
     this.running = false;
-    if (this.thinkTimer) clearTimeout(this.thinkTimer);
-    if (this.animFrame) cancelAnimationFrame(this.animFrame);
+    if (this.thinkTimer) {
+      clearTimeout(this.thinkTimer);
+      this.thinkTimer = null;
+    }
+    if (this.animFrame) {
+      cancelAnimationFrame(this.animFrame);
+      this.animFrame = null;
+    }
   }
 
   _effectiveThinkDelay() {
-    const d = this.profile.thinkDelay;
-    if (this.thinkCapMs == null) return d;
-    return Math.min(d, this.thinkCapMs);
+    const d = this.profile.thinkDelay * AI_TEMPO_SCALE;
+    if (this.thinkCapMs == null) return Math.round(d);
+    return Math.round(Math.min(d, this.thinkCapMs * AI_TEMPO_SCALE));
   }
 
   _spawn() {
     this.current = this.next;
     this.next = this._spawnPiece(this._getFromBag());
     if (this._collides(this.current.shape, this.current.x, this.current.y)) {
+      if (this.thinkTimer) {
+        clearTimeout(this.thinkTimer);
+        this.thinkTimer = null;
+      }
+      if (this.animFrame) {
+        cancelAnimationFrame(this.animFrame);
+        this.animFrame = null;
+      }
       this.running = false;
       this.gameOver = true;
       this.onGameOver(this.score, this.lines);
@@ -250,29 +271,71 @@ class AIBot {
 
   _lock() {
     const { shape, x, y, type } = this.current;
+    for (let r = 0; r < shape.length; r++) {
+      for (let c = 0; c < shape[r].length; c++) {
+        if (!shape[r][c]) continue;
+        if (y + r < 0) {
+          if (this.thinkTimer) {
+            clearTimeout(this.thinkTimer);
+            this.thinkTimer = null;
+          }
+          if (this.animFrame) {
+            cancelAnimationFrame(this.animFrame);
+            this.animFrame = null;
+          }
+          this.running = false;
+          this.gameOver = true;
+          this.onGameOver(this.score, this.lines);
+          return;
+        }
+      }
+    }
     shape.forEach((row, r) => row.forEach((v, c) => {
-      if (v && y + r >= 0) this.board[y + r][x + c] = type;
+      if (v && y + r >= 0 && y + r < ROWS && x + c >= 0 && x + c < COLS) {
+        this.board[y + r][x + c] = type;
+      }
     }));
-    const cleared = this._clearLines();
+    const clearResult = this._clearLines();
+    const cleared = clearResult.count;
     if (cleared > 0) {
+      this.comboCount++;
       this.score += (SCORE_TABLE[cleared] || 0) * this.level;
       this.lines += cleared;
       this.level = this.stage + Math.floor(this.lines / 10);
-      if (cleared >= 2) this.onAttack(cleared - 1);
+      let attackPower = 0;
+      if (cleared >= 2) attackPower += cleared - 1;
+      if (cleared >= 1 && this.comboCount >= 2) {
+        attackPower += this.comboCount - 1;
+      }
+      attackPower = Math.min(12, attackPower);
+      if (attackPower > 0) this.onAttack(attackPower);
+      if (typeof this.onLineClear === 'function') {
+        this.onLineClear({
+          cleared,
+          rowIndices: clearResult.rows,
+          comboCount: this.comboCount,
+        });
+      }
+    } else {
+      this.comboCount = 0;
     }
     this._spawn();
+    if (typeof this.onLock === 'function') this.onLock(cleared);
   }
 
   _clearLines() {
-    let cleared = 0;
-    for (let r = ROWS - 1; r >= 0; r--) {
-      if (this.board[r].every(c => c !== 0)) {
-        this.board.splice(r, 1);
-        this.board.unshift(Array(COLS).fill(0));
-        cleared++; r++;
-      }
+    const fullRows = [];
+    for (let r = 0; r < ROWS; r++) {
+      if (this.board[r].every((c) => c !== 0)) fullRows.push(r);
     }
-    return cleared;
+    if (!fullRows.length) return { count: 0, rows: [] };
+    fullRows.sort((a, b) => b - a);
+    for (const r of fullRows) {
+      this.board.splice(r, 1);
+      this.board.unshift(Array(COLS).fill(0));
+    }
+    fullRows.sort((a, b) => a - b);
+    return { count: fullRows.length, rows: fullRows };
   }
 
   _hardDropPiece() {
@@ -311,7 +374,7 @@ class AIBot {
 
     if (this.movePhase === 'adjust') {
       this.moveStepAccum += delta;
-      const stepMs = Math.max(18, 56 - this.stage * 5);
+      const stepMs = (Math.max(18, 56 - this.stage * 5)) * AI_TEMPO_SCALE;
       while (this.movePhase === 'adjust' && this.moveStepAccum >= stepMs) {
         this.moveStepAccum -= stepMs;
         if (this.pendingRots > 0) {
@@ -413,3 +476,18 @@ class AIBot {
   const names = ['applyPenalty', 'addGarbage', '_garbageRectOccupied', '_placeGarbageRect', '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_penaltyColumns', '_penaltyShower', '_resolveCurrentAfterGarbage'];
   names.forEach((n) => { AIBot.prototype[n] = TetrisGame.prototype[n]; });
 })();
+
+/** 훼방으로 눌려 게임오버될 때도 think 타이머·rAF를 끊어 onGameOver 이후 유령 루프 방지 */
+AIBot.prototype._resolveCurrentAfterGarbage = function aiResolveAfterGarbage() {
+  TetrisGame.prototype._resolveCurrentAfterGarbage.call(this);
+  if (this.gameOver) {
+    if (this.thinkTimer) {
+      clearTimeout(this.thinkTimer);
+      this.thinkTimer = null;
+    }
+    if (this.animFrame) {
+      cancelAnimationFrame(this.animFrame);
+      this.animFrame = null;
+    }
+  }
+};

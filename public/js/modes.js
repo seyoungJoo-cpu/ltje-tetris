@@ -133,7 +133,11 @@ function startVsGame(aiStageNum) {
       // 내가 게임오버
       endVsGame(false, score);
     },
-    { showGhost: gameOptions.showGhost }
+    { showGhost: gameOptions.showGhost,
+      onLineClear: (p) => {
+        if (typeof runLineClearBoardFx === 'function') runLineClearBoardFx(document.getElementById('vs-my-canvas'), p);
+      },
+    }
   );
 
   // AI 봇
@@ -155,6 +159,11 @@ function startVsGame(aiStageNum) {
       document.getElementById('vs-ai-lines-display').textContent = state.lines;
       // 모바일 미니 스탯바
       const ma = document.getElementById('vs-m-ai-score'); if (ma) ma.textContent = state.score.toLocaleString();
+    },
+    {
+      onLineClear: (p) => {
+        if (typeof runLineClearBoardFx === 'function') runLineClearBoardFx(document.getElementById('vs-ai-canvas'), p);
+      },
     }
   );
 
@@ -242,6 +251,19 @@ function startAIBattle(aiStageNum) {
   );
 }
 
+function syncSoloPauseButton() {
+  const btn = document.getElementById('solo-pause-btn');
+  if (!btn || typeof tetris === 'undefined' || !tetris) return;
+  btn.textContent = tetris.paused ? '계속' : '일시정지';
+}
+
+function soloTogglePause() {
+  if (typeof tetris === 'undefined' || !tetris || !tetris.running || tetris.gameOver) return;
+  tetris.togglePause();
+}
+
+window.syncSoloPauseButton = syncSoloPauseButton;
+
 // ── 솔로 모드 ─────────────────────────────────────────────────
 function enterSolo() {
   currentMode = 'solo';
@@ -282,9 +304,14 @@ function startSoloGame() {
     (score, lines) => {
       endSoloGame(score, lines);
     },
-    { showGhost: gameOptions.showGhost }
+    { showGhost: gameOptions.showGhost, allowPause: true,
+      onLineClear: (p) => {
+        if (typeof runLineClearBoardFx === 'function') runLineClearBoardFx(document.getElementById('solo-my-canvas'), p);
+      },
+    }
   );
   tetris.start();
+  syncSoloPauseButton();
 }
 
 function endSoloGame(score, lines) {
@@ -307,6 +334,8 @@ function soloBackToLobby() {
   if (tetris) tetris.stop();
   soloActive = false;
   document.getElementById('solo-gameover-overlay').classList.remove('show');
+  const pb = document.getElementById('solo-pause-btn');
+  if (pb) pb.textContent = '일시정지';
   showScreen('lobby-screen');
 }
 

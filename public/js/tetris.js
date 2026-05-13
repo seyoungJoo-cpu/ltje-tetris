@@ -3,7 +3,7 @@
 
 const COLS = 10, ROWS = 20;
 const BLOCK = 24; // my canvas block size
-const OPP_BLOCK = 13; // opponent minimap block size (온라인 상대 미니맵)
+const OPP_BLOCK = 15; // opponent minimap block size (온라인 상대 미니맵)
 
 const COLORS = {
   I: '#00e5ff',
@@ -40,7 +40,11 @@ class TetrisGame {
     this.onStateChange = onStateChange;
     this.onAttack = onAttack;
     this.onGameOver = onGameOver;
+    this.onLock = typeof options.onLock === 'function' ? options.onLock : null;
+    this.onLineClear = typeof options.onLineClear === 'function' ? options.onLineClear : null;
     this.showGhost = options.showGhost !== false; // 기본값 true
+    this.allowPause = options.allowPause === true;
+    this.paused = false;
 
     this.board = this._emptyBoard();
     this.current = null;
@@ -53,6 +57,7 @@ class TetrisGame {
     this.dropAccum = 0;
     this.gameOver = false;
     this.bag = [];
+    this.comboCount = 0;
 
     this._bindKeys();
   }
@@ -82,14 +87,24 @@ class TetrisGame {
     this.board = this._emptyBoard();
     this.score = 0; this.lines = 0; this.level = 1;
     this.gameOver = false; this.running = true;
+    this.paused = false;
     this.bag = [];
+    this.comboCount = 0;
     this.next = this._spawnPiece(this._getFromBag());
     this._spawn();
     this.lastTime = performance.now();
     requestAnimationFrame(this._loop.bind(this));
   }
 
-  stop() { this.running = false; }
+  stop() { this.running = false; this.paused = false; }
+
+  togglePause() {
+    if (!this.allowPause || !this.running || this.gameOver) return;
+    this.paused = !this.paused;
+    if (!this.paused) this.lastTime = performance.now();
+    this._draw();
+    if (typeof window.syncSoloPauseButton === 'function') window.syncSoloPauseButton();
+  }
 
   setShowGhost(on) {
     this.showGhost = !!on;
@@ -111,14 +126,16 @@ class TetrisGame {
     if (!this.running) return;
     const delta = ts - this.lastTime;
     this.lastTime = ts;
-    this.dropAccum += delta;
-    const speed = LEVEL_SPEED[Math.min(this.level - 1, LEVEL_SPEED.length - 1)];
-    if (this.dropAccum >= speed) {
-      this._drop();
-      this.dropAccum = 0;
+    if (!this.paused) {
+      this.dropAccum += delta;
+      const speed = LEVEL_SPEED[Math.min(this.level - 1, LEVEL_SPEED.length - 1)];
+      if (this.dropAccum >= speed) {
+        this._drop();
+        this.dropAccum = 0;
+      }
     }
     this._draw();
-    this.onStateChange(this._getState());
+    if (!this.paused) this.onStateChange(this._getState());
     requestAnimationFrame(this._loop.bind(this));
   }
 
@@ -132,30 +149,63 @@ class TetrisGame {
 
   _lock() {
     const { shape, x, y, type } = this.current;
+    for (let r = 0; r < shape.length; r++) {
+      for (let c = 0; c < shape[r].length; c++) {
+        if (!shape[r][c]) continue;
+        if (y + r < 0) {
+          this.running = false;
+          this.gameOver = true;
+          this.onGameOver(this.score, this.lines);
+          return;
+        }
+      }
+    }
     shape.forEach((row, r) => row.forEach((v, c) => {
-      if (v) this.board[y + r][x + c] = type;
+      if (v && y + r >= 0 && y + r < ROWS && x + c >= 0 && x + c < COLS) {
+        this.board[y + r][x + c] = type;
+      }
     }));
-    const cleared = this._clearLines();
+    const clearResult = this._clearLines();
+    const cleared = clearResult.count;
     if (cleared > 0) {
+      this.comboCount++;
       this.score += (SCORE_TABLE[cleared] || 0) * this.level;
       this.lines += cleared;
       this.level = Math.floor(this.lines / 10) + 1;
-      if (cleared >= 2) this.onAttack(cleared - 1);
+      let attackPower = 0;
+      if (cleared >= 2) attackPower += cleared - 1;
+      if (cleared >= 1 && this.comboCount >= 2) {
+        attackPower += this.comboCount - 1;
+      }
+      attackPower = Math.min(12, attackPower);
+      if (attackPower > 0 && typeof this.onAttack === 'function') this.onAttack(attackPower);
+      if (typeof this.onLineClear === 'function') {
+        this.onLineClear({
+          cleared,
+          rowIndices: clearResult.rows,
+          comboCount: this.comboCount,
+        });
+      }
+    } else {
+      this.comboCount = 0;
     }
     this._spawn();
+    if (typeof this.onLock === 'function') this.onLock(cleared);
   }
 
   _clearLines() {
-    let cleared = 0;
-    for (let r = ROWS - 1; r >= 0; r--) {
-      if (this.board[r].every(c => c !== 0)) {
-        this.board.splice(r, 1);
-        this.board.unshift(Array(COLS).fill(0));
-        cleared++;
-        r++;
-      }
+    const fullRows = [];
+    for (let r = 0; r < ROWS; r++) {
+      if (this.board[r].every((c) => c !== 0)) fullRows.push(r);
     }
-    return cleared;
+    if (!fullRows.length) return { count: 0, rows: [] };
+    fullRows.sort((a, b) => b - a);
+    for (const r of fullRows) {
+      this.board.splice(r, 1);
+      this.board.unshift(Array(COLS).fill(0));
+    }
+    fullRows.sort((a, b) => a - b);
+    return { count: fullRows.length, rows: fullRows };
   }
 
   _collides(shape, px, py) {
@@ -403,6 +453,18 @@ class TetrisGame {
         if (v) this._drawBlock(ctx, this.current.x + c, this.current.y + r, COLORS[this.current.type], BLOCK);
       }));
     }
+
+    if (this.paused) {
+      ctx.fillStyle = 'rgba(0,0,0,0.52)';
+      ctx.fillRect(0, 0, COLS * BLOCK, ROWS * BLOCK);
+      ctx.fillStyle = 'rgba(230,230,255,0.95)';
+      ctx.font = `bold ${Math.floor(BLOCK * 1.1)}px Jua, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('일시정지', (COLS * BLOCK) / 2, (ROWS * BLOCK) / 2);
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
+    }
   }
 
   _drawNext() {
@@ -450,12 +512,21 @@ class TetrisGame {
       lines: this.lines,
       level: this.level,
       over: this.gameOver,
+      combo: this.comboCount,
     };
   }
 
   _bindKeys() {
     document.addEventListener('keydown', (e) => {
       if (!this.running) return;
+      if (this.allowPause && (e.key === 'p' || e.key === 'P')) {
+        if (!this.gameOver) {
+          e.preventDefault();
+          this.togglePause();
+        }
+        return;
+      }
+      if (this.paused) return;
       switch (e.key) {
         case 'ArrowLeft':
           if (!this._collides(this.current.shape, this.current.x - 1, this.current.y))

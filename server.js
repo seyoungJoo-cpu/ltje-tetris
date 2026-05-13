@@ -127,6 +127,7 @@ function removePlayerFromRoom(socketId) {
   room.players = room.players.filter(id => id !== socketId);
   room.readySet.delete(socketId);
   delete room.gameStates[socketId];
+  if (room.incomingGarbage) delete room.incomingGarbage[socketId];
 
   if (room.players.length === 0) {
     delete rooms[p.roomId];
@@ -158,6 +159,7 @@ function removePlayerFromRoom(socketId) {
           room.status = 'waiting';
           room.readySet.clear();
           room.gameStates = {};
+          room.incomingGarbage = {};
         } else if (alive1.length === 0 && alive0.length > 0) {
           const rep = alive0[0];
           io.to(p.roomId).emit('game:over', {
@@ -170,6 +172,7 @@ function removePlayerFromRoom(socketId) {
           room.status = 'waiting';
           room.readySet.clear();
           room.gameStates = {};
+          room.incomingGarbage = {};
         } else if (room.players.length === 1 && !room.bots?.length) {
           const winnerId = room.players[0];
           const winnerNick = players[winnerId]?.nickname || '?';
@@ -177,6 +180,7 @@ function removePlayerFromRoom(socketId) {
           room.status = 'waiting';
           room.readySet.clear();
           room.gameStates = {};
+          room.incomingGarbage = {};
         }
       } else if (room.players.length === 1 && !room.bots?.length) {
         const winnerId = room.players[0];
@@ -185,6 +189,7 @@ function removePlayerFromRoom(socketId) {
         room.status = 'waiting';
         room.readySet.clear();
         room.gameStates = {};
+        room.incomingGarbage = {};
       }
     }
     io.to(p.roomId).emit('room:update', sanitizeRoom(room));
@@ -286,9 +291,15 @@ function rollPenaltyPayload(power) {
 }
 
 function emitGarbageToTarget(io, room, roomId, fromId, targetId, n) {
+  queueGarbageAttack(io, room, roomId, fromId, targetId, n);
+}
+
+/** 맨 앞 훼방이 떨어지기 전, 이 횟수만큼 블록을 내려놓을 기회(줄 안 지우면 1씩 감소) */
+const GARBAGE_LOCKS_BEFORE_DROP = 3;
+
+function deliverGarbageWithPenalty(io, room, roomId, fromId, targetId, n, penalty) {
   const fromNick = resolveSlotNickname(room, fromId);
   const toNick = resolveSlotNickname(room, targetId);
-  const penalty = rollPenaltyPayload(n);
   const payload = { from: fromId, power: n, ...penalty };
   if (isBotId(targetId)) {
     io.to(room.host).emit('game:garbageBot', { botId: targetId, ...payload });
@@ -305,15 +316,117 @@ function emitGarbageToTarget(io, room, roomId, fromId, targetId, n) {
   });
 }
 
+function serializeIncomingQueue(room, targetId) {
+  const locksMax = GARBAGE_LOCKS_BEFORE_DROP;
+  const q = room.incomingGarbage?.[targetId] || [];
+  return q.map((x) => ({
+    power: Math.max(1, x.power | 0),
+    locksLeft: Math.max(0, x.locksLeft != null ? x.locksLeft : locksMax),
+    fromId: x.fromId,
+  }));
+}
+
+function emitIncomingQueueUpdate(io, room, roomId, targetId) {
+  const locksMax = GARBAGE_LOCKS_BEFORE_DROP;
+  const queue = serializeIncomingQueue(room, targetId);
+  io.to(roomId).emit('game:incomingUpdate', { targetId, queue, locksMax });
+}
+
+function queueGarbageAttack(io, room, roomId, fromId, targetId, n) {
+  const p = Math.max(1, Math.min(12, parseInt(n, 10) || 1));
+  if (!room.incomingGarbage) room.incomingGarbage = {};
+  if (!room.incomingGarbage[targetId]) room.incomingGarbage[targetId] = [];
+  room.incomingGarbage[targetId].push({
+    fromId,
+    targetId,
+    power: p,
+    locksLeft: GARBAGE_LOCKS_BEFORE_DROP,
+  });
+  emitIncomingQueueUpdate(io, room, roomId, targetId);
+  io.to(roomId).emit('game:attackQueued', {
+    targetId,
+    fromId,
+    power: p,
+    queueLen: room.incomingGarbage[targetId].length,
+  });
+}
+
+function processGameLock(io, room, roomId, targetId, clearedRaw) {
+  const q = room.incomingGarbage?.[targetId];
+  if (!q?.length) return;
+  const cleared = Math.max(0, Math.min(8, parseInt(clearedRaw, 10) || 0));
+
+  if (cleared > 0) {
+    const powerBefore = q.reduce((s, x) => s + Math.max(1, x.power | 0), 0);
+    reduceIncomingGarbage(room, targetId, cleared);
+    const qAfter = room.incomingGarbage?.[targetId];
+    const powerAfter = (qAfter || []).reduce((s, x) => s + Math.max(1, x.power | 0), 0);
+    const absorbed = Math.max(0, powerBefore - powerAfter);
+    if (qAfter?.length) {
+      qAfter[0].locksLeft = GARBAGE_LOCKS_BEFORE_DROP;
+    }
+    io.to(roomId).emit('game:defendFx', {
+      to: targetId,
+      linesCleared: cleared,
+      absorbed,
+    });
+    emitIncomingQueueUpdate(io, room, roomId, targetId);
+    return;
+  }
+
+  const head = q[0];
+  const prevLeft = head.locksLeft != null ? head.locksLeft : GARBAGE_LOCKS_BEFORE_DROP;
+  head.locksLeft = Math.max(0, prevLeft - 1);
+  io.to(roomId).emit('game:threatTick', {
+    targetId,
+    locksLeft: head.locksLeft,
+    power: Math.max(1, head.power | 0),
+    imminent: head.locksLeft === 0,
+  });
+
+  if (head.locksLeft > 0) {
+    emitIncomingQueueUpdate(io, room, roomId, targetId);
+    return;
+  }
+
+  const item = q.shift();
+  const penalty = rollPenaltyPayload(item.power);
+  deliverGarbageWithPenalty(io, room, roomId, item.fromId, targetId, item.power, penalty);
+  if (!q.length) delete room.incomingGarbage[targetId];
+  emitIncomingQueueUpdate(io, room, roomId, targetId);
+}
+
+function reduceIncomingGarbage(room, targetId, defendLines) {
+  const rem0 = Math.max(0, Math.min(8, parseInt(defendLines, 10) || 0));
+  if (rem0 <= 0) return;
+  let rem = rem0;
+  const q = room.incomingGarbage?.[targetId];
+  if (!q?.length) return;
+  while (rem > 0 && q.length) {
+    const head = q[0];
+    const p = Math.max(1, head.power | 0);
+    if (p <= rem) {
+      rem -= p;
+      q.shift();
+    } else {
+      head.power -= rem;
+      rem = 0;
+    }
+  }
+  if (!q.length) delete room.incomingGarbage[targetId];
+}
+
 function endRoundAndReset(room, roomId) {
   room.status = 'waiting';
   room.readySet.clear();
   room.gameStates = {};
+  room.incomingGarbage = {};
   io.emit('lobby:rooms', getRoomList());
   io.to(roomId).emit('room:update', sanitizeRoom(room));
 }
 
 function maybeTeamOrFfaWin(room, roomId) {
+  if (!room || room.status !== 'playing') return false;
   const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
   if (isTeam) {
     const alive0 = allSlotIds(room).filter(
@@ -428,7 +541,10 @@ io.on('connection', (socket) => {
     if (roomOccupancy(room) >= room.maxPlayers) return socket.emit('error', '방이 꽉 찼습니다.');
     const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
     const t = isTeam ? (team === 1 ? 1 : 0) : 0;
-    const st = Math.min(7, Math.max(1, parseInt(stage, 10) || 3));
+    const parsed = parseInt(stage, 10);
+    const st = Number.isFinite(parsed) && parsed >= 1 && parsed <= 7
+      ? Math.min(7, Math.max(1, parsed))
+      : 3 + Math.floor(Math.random() * 4);
     const botId = `bot_${room.id}_${botIdCounter++}`;
     const n = (room.bots?.length || 0) + 1;
     const bot = { id: botId, nickname: `AI-${n}`, team: t, stage: st };
@@ -512,6 +628,7 @@ io.on('connection', (socket) => {
     if (canStartGame(room)) {
       room.status = 'playing';
       room.gameStates = {};
+      room.incomingGarbage = {};
       const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
       const teamsMap = buildTeamMap(room);
       const playersPayload = [
@@ -534,6 +651,23 @@ io.on('connection', (socket) => {
       });
       io.emit('lobby:rooms', getRoomList());
     }
+  });
+
+  socket.on('game:lock', ({ cleared }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.status !== 'playing') return;
+    processGameLock(io, room, p.roomId, socket.id, cleared);
+  });
+
+  socket.on('game:botLock', ({ botId, cleared }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.status !== 'playing' || room.host !== socket.id) return;
+    if (!isBotId(botId) || !room.bots?.some((b) => b.id === botId)) return;
+    processGameLock(io, room, p.roomId, botId, cleared);
   });
 
   // 게임 상태 브로드캐스트 (보드, 점수 등)
@@ -566,6 +700,10 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id || room.status !== 'playing') return;
     if (!room.bots?.some((b) => b.id === botId)) return;
     room.gameStates[botId] = state;
+    if (state && state.over) {
+      room.gameStates[botId] = Object.assign({}, room.gameStates[botId], { over: true });
+      maybeTeamOrFfaWin(room, p.roomId);
+    }
     socket.to(p.roomId).emit('game:opponent', { id: botId, state });
   });
 
