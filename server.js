@@ -426,7 +426,8 @@ io.on('connection', (socket) => {
     const room = rooms[p.roomId];
     if (!room || room.host !== socket.id || room.status !== 'waiting') return;
     if (roomOccupancy(room) >= room.maxPlayers) return socket.emit('error', '방이 꽉 찼습니다.');
-    const t = team === 1 ? 1 : 0;
+    const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
+    const t = isTeam ? (team === 1 ? 1 : 0) : 0;
     const st = Math.min(7, Math.max(1, parseInt(stage, 10) || 3));
     const botId = `bot_${room.id}_${botIdCounter++}`;
     const n = (room.bots?.length || 0) + 1;

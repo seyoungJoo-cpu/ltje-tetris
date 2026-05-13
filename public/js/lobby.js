@@ -30,8 +30,10 @@ function spawnHostAiBots(playersList) {
   const lastEmit = {};
   playersList.filter((p) => p.isBot).forEach((p) => {
     const c = document.createElement('canvas');
-    c.width = 100;
-    c.height = 200;
+    const cw = typeof COLS !== 'undefined' && typeof BLOCK !== 'undefined' ? COLS * BLOCK : 240;
+    const ch = typeof ROWS !== 'undefined' && typeof BLOCK !== 'undefined' ? ROWS * BLOCK : 480;
+    c.width = cw;
+    c.height = ch;
     root.appendChild(c);
     const stage = Math.min(7, Math.max(1, parseInt(p.stage, 10) || 3));
     const bot = new AIBot(
@@ -45,7 +47,11 @@ function spawnHostAiBots(playersList) {
         if ((now - (lastEmit[p.id] || 0)) < 22) return;
         lastEmit[p.id] = now;
         socket.emit('game:botState', { botId: p.id, state });
-      }
+        if (typeof drawOpponentBoard === 'function' && opponentCanvases[p.id]) {
+          drawOpponentBoard(opponentCanvases[p.id], state);
+        }
+      },
+      { thinkCapMs: 380 }
     );
     onlineHostBots[p.id] = bot;
     bot.start();
@@ -205,32 +211,44 @@ function renderRoom(room) {
   document.getElementById('room-name-display').title = modeLabel + (room.hasPassword ? ' · 비밀방' : '');
   const playersEl = document.getElementById('room-players');
   const teams = room.teams;
+  const isTeamMode = room.gameMode === 'team2' || room.gameMode === 'team3';
   const hostPanel = document.getElementById('room-host-panel');
   if (hostPanel) {
     const showHost = room.host === socket.id && room.status === 'waiting';
     hostPanel.style.display = showHost ? 'block' : 'none';
+    const ffaBtn = hostPanel.querySelector('[data-add-bot-ffa]');
+    const teamBtns = hostPanel.querySelectorAll('.host-bot-team-btn');
+    if (ffaBtn && teamBtns.length) {
+      const ffa = room.gameMode === 'ffa';
+      ffaBtn.style.display = ffa ? '' : 'none';
+      teamBtns.forEach((b) => { b.style.display = ffa ? 'none' : ''; });
+    }
   }
 
   playersEl.innerHTML = room.players.map(p => {
     const isBot = p.isBot;
-    const teamHtml = teams && teams[p.id] !== undefined
+    const teamHtml = isTeamMode && teams && teams[p.id] !== undefined
       ? `<div class="player-team-tag ${teams[p.id] === 0 ? 'ta' : 'tb'}">${teams[p.id] === 0 ? '🅰 팀 A' : '🅱 팀 B'}</div>`
       : '';
-    const teamClass = teams && teams[p.id] === 0 ? 'team-a' : teams && teams[p.id] === 1 ? 'team-b' : '';
-    const selfPick = !isBot && teams && p.id === socket.id && room.status === 'waiting'
+    const teamClass = isTeamMode && teams && teams[p.id] === 0 ? 'team-a' : isTeamMode && teams && teams[p.id] === 1 ? 'team-b' : '';
+    const selfPick = isTeamMode && !isBot && teams && p.id === socket.id && room.status === 'waiting'
       ? `<div class="team-pick-row">
           <button type="button" data-team-set="0" class="${teams[p.id] === 0 ? 'active-a' : ''}">팀 A</button>
           <button type="button" data-team-set="1" class="${teams[p.id] === 1 ? 'active-b' : ''}">팀 B</button>
         </div>`
       : '';
     const botControls = isBot && room.host === socket.id && room.status === 'waiting'
-      ? `<div class="bot-admin-row">
+      ? (isTeamMode
+        ? `<div class="bot-admin-row">
           <select data-bot-team-select="${escHtml(p.id)}" class="host-bot-select">
             <option value="0" ${teams && teams[p.id] === 0 ? 'selected' : ''}>팀 A</option>
             <option value="1" ${teams && teams[p.id] === 1 ? 'selected' : ''}>팀 B</option>
           </select>
           <button type="button" class="btn btn-danger btn-sm" data-bot-remove="${escHtml(p.id)}">AI 제거</button>
         </div>`
+        : `<div class="bot-admin-row">
+          <button type="button" class="btn btn-danger btn-sm" data-bot-remove="${escHtml(p.id)}">AI 제거</button>
+        </div>`)
       : '';
     return `
     <div class="player-card ${p.ready ? 'ready' : ''} ${p.id === room.host ? 'host' : ''} ${teamClass} ${isBot ? 'is-bot' : ''}">
@@ -267,6 +285,12 @@ document.getElementById('room-players')?.addEventListener('change', (e) => {
 });
 
 document.getElementById('room-host-panel')?.addEventListener('click', (e) => {
+  const ffaAdd = e.target.closest('[data-add-bot-ffa]');
+  if (ffaAdd && myRoomData?.host === socket.id) {
+    const stage = parseInt(document.getElementById('room-bot-stage')?.value, 10) || 3;
+    socket.emit('room:addBot', { team: 0, stage });
+    return;
+  }
   const add = e.target.closest('[data-add-bot]');
   if (!add || myRoomData?.host !== socket.id) return;
   const team = parseInt(add.dataset.addBot, 10);
@@ -318,6 +342,44 @@ function sendRoomChat() {
   input.value = '';
 }
 
+function createOppPanelWrap(p, isMate) {
+  const wrap = document.createElement('div');
+  wrap.className = 'opponent-panel-wrap' + (isMate ? ' teammate' : '');
+  wrap.id = `opp-wrap-${p.id}`;
+  const cw = COLS * OPP_BLOCK;
+  const ch = ROWS * OPP_BLOCK;
+  wrap.innerHTML = `
+    <div class="opponent-panel">
+      <div class="player-label">${escHtml(p.nickname)}${p.isBot ? ' 🤖' : ''}</div>
+      <canvas class="opp-canvas" id="opp-${p.id}" width="${cw}" height="${ch}"></canvas>
+    </div>`;
+  opponentCanvases[p.id] = wrap.querySelector('canvas');
+  return wrap;
+}
+
+/** 상대 미니맵: 윗줄 최대 2칸, 아랫줄 나머지(최대 3칸 느낌으로 배치) */
+function appendOpponentTwoRowBlock(panel, label, sectionClass, list, isMate) {
+  if (!list.length) return;
+  const sec = document.createElement('div');
+  sec.className = 'opp-section' + (sectionClass ? ' ' + sectionClass : '');
+  if (label) {
+    const lb = document.createElement('div');
+    lb.className = 'opp-section-label';
+    lb.textContent = label;
+    sec.appendChild(lb);
+  }
+  const top = document.createElement('div');
+  top.className = 'opp-row-top';
+  const bot = document.createElement('div');
+  bot.className = 'opp-row-btm';
+  const topCount = Math.min(2, list.length);
+  for (let i = 0; i < topCount; i++) top.appendChild(createOppPanelWrap(list[i], isMate));
+  for (let i = topCount; i < list.length; i++) bot.appendChild(createOppPanelWrap(list[i], isMate));
+  sec.appendChild(top);
+  if (list.length > topCount) sec.appendChild(bot);
+  panel.appendChild(sec);
+}
+
 // ── 게임 시작 ──
 function startGame(players, showGhost) {
   const ghostOpt = showGhost !== false;
@@ -334,22 +396,18 @@ function startGame(players, showGhost) {
 
   const teams = myRoomData?.teams;
   const myTeam = teams?.[socket.id];
+  const gm = myRoomData?.gameMode;
+  const isTeamGame = gm === 'team2' || gm === 'team3';
+  const others = players.filter((p) => p.id !== socket.id);
 
-  players.forEach(p => {
-    if (p.id === socket.id) return;
-    const isMate = myTeam !== undefined && teams && teams[p.id] === myTeam;
-    const wrap = document.createElement('div');
-    wrap.className = 'opponent-panel-wrap' + (isMate ? ' teammate' : '');
-    wrap.id = `opp-wrap-${p.id}`;
-    wrap.innerHTML = `
-      <div class="opponent-panel">
-        <div class="player-label">${escHtml(p.nickname)}${p.isBot ? ' 🤖' : ''}</div>
-        <canvas class="opp-canvas" id="opp-${p.id}" width="${10 * 10}" height="${20 * 10}"></canvas>
-      </div>
-    `;
-    oppPanel.appendChild(wrap);
-    opponentCanvases[p.id] = document.getElementById(`opp-${p.id}`);
-  });
+  if (isTeamGame && teams && myTeam !== undefined) {
+    const enemies = others.filter((p) => teams[p.id] !== myTeam);
+    const mates = others.filter((p) => teams[p.id] === myTeam);
+    appendOpponentTwoRowBlock(oppPanel, '적 팀', 'opp-section-enemy', enemies, false);
+    appendOpponentTwoRowBlock(oppPanel, '아군', 'opp-section-mate', mates, true);
+  } else {
+    appendOpponentTwoRowBlock(oppPanel, '', '', others, false);
+  }
 
   const myCanvas = document.getElementById('my-canvas');
   const nextCanvas = document.getElementById('next-canvas');
@@ -489,6 +547,14 @@ function ensureAttackFxRoot() {
   return root;
 }
 
+function quadAttackPoint(p0, pc, p1, t) {
+  const u = 1 - t;
+  return {
+    x: u * u * p0.x + 2 * u * t * pc.x + t * t * p1.x,
+    y: u * u * p0.y + 2 * u * t * pc.y + t * t * p1.y,
+  };
+}
+
 function runAttackTrail(fx) {
   const gs = document.getElementById('game-screen');
   if (!gs?.classList.contains('active')) return;
@@ -502,18 +568,37 @@ function runAttackTrail(fx) {
   const cy1 = a.top + a.height / 2;
   const cx2 = b.left + b.width / 2;
   const cy2 = b.top + b.height / 2;
-  const dx = cx2 - cx1;
-  const dy = cy2 - cy1;
-  const dist = Math.max(40, Math.hypot(dx, dy));
-  const ang = (Math.atan2(dy, dx) * 180) / Math.PI;
+  const rdx = cx2 - cx1;
+  const rdy = cy2 - cy1;
+  const dist = Math.max(72, Math.hypot(rdx, rdy));
+  const mx = (cx1 + cx2) / 2;
+  const my = (cy1 + cy2) / 2;
+  const nx = -rdy / dist;
+  const ny = rdx / dist;
+  const bulge = Math.min(260, dist * 0.5);
+  const sideFlip = ((String(from).length + String(to).length + (lines | 0)) % 2 === 0) ? 1 : -1;
+  const pc = { x: mx + nx * bulge * sideFlip, y: my + ny * bulge * sideFlip };
+  const p0 = { x: cx1, y: cy1 };
+  const p1 = { x: cx2, y: cy2 };
+  const dPath = `M ${p0.x} ${p0.y} Q ${pc.x} ${pc.y} ${p1.x} ${p1.y}`;
+
   const root = ensureAttackFxRoot();
-  const beam = document.createElement('div');
-  beam.className = 'attack-beam beam-kind-' + (kind || 'rows');
-  beam.style.left = cx1 + 'px';
-  beam.style.top = cy1 - 8 + 'px';
-  beam.style.width = dist + 'px';
-  beam.style.transform = `rotate(${ang}deg)`;
-  root.appendChild(beam);
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'attack-curve-svg');
+  const pathGlow = document.createElementNS(ns, 'path');
+  pathGlow.setAttribute('d', dPath);
+  pathGlow.setAttribute('class', 'attack-curve-glow path-kind-' + (kind || 'rows'));
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', dPath);
+  path.setAttribute('class', 'attack-curve-path path-kind-' + (kind || 'rows'));
+  svg.appendChild(pathGlow);
+  svg.appendChild(path);
+  root.appendChild(svg);
+
+  const orb = document.createElement('div');
+  orb.className = 'attack-orb-wrap orb-kind-' + (kind || 'rows');
+  root.appendChild(orb);
 
   const burst = document.createElement('div');
   burst.className = 'attack-burst';
@@ -523,10 +608,54 @@ function runAttackTrail(fx) {
     <span class="burst-label">${escHtml(fromNick || '')} → ${escHtml(toNick || '')}</span>`;
   root.appendChild(burst);
 
+  requestAnimationFrame(() => {
+    let pathLen = 0;
+    try {
+      pathLen = path.getTotalLength();
+    } catch (e) {
+      pathLen = dist * 1.4;
+    }
+    path.style.strokeDasharray = String(pathLen);
+    path.style.strokeDashoffset = String(pathLen);
+    pathGlow.style.strokeDasharray = String(pathLen);
+    pathGlow.style.strokeDashoffset = String(pathLen);
+
+    const t0 = performance.now();
+    const dur = Math.min(980, 460 + dist * 0.62);
+    let lastTrail = 0;
+    function step(now) {
+      const raw = Math.min(1, (now - t0) / dur);
+      const drawT = 1 - Math.pow(1 - raw, 1.22);
+      const orbT = 1 - Math.pow(1 - raw, 2.05);
+      const off = String(pathLen * (1 - drawT));
+      path.style.strokeDashoffset = off;
+      pathGlow.style.strokeDashoffset = off;
+      const pos = quadAttackPoint(p0, pc, p1, orbT);
+      orb.style.left = pos.x + 'px';
+      orb.style.top = pos.y + 'px';
+      if (raw - lastTrail > 0.035) {
+        lastTrail = raw;
+        const dot = document.createElement('div');
+        dot.className = 'attack-trail-dot';
+        dot.style.left = pos.x + 'px';
+        dot.style.top = pos.y + 'px';
+        root.appendChild(dot);
+        setTimeout(() => dot.remove(), 480);
+      }
+      if (raw < 1) requestAnimationFrame(step);
+      else {
+        path.style.strokeDashoffset = '0';
+        pathGlow.style.strokeDashoffset = '0';
+      }
+    }
+    requestAnimationFrame(step);
+  });
+
   setTimeout(() => {
-    beam.remove();
+    svg.remove();
+    orb.remove();
     burst.remove();
-  }, 900);
+  }, 1100);
 }
 
 function runIncomingPenaltyVfx(penalty) {
@@ -581,6 +710,13 @@ socket.on('game:attackFx', (fx) => {
   pulseOppFx(from, 'panel-fx-out');
   pulseOppFx(to, 'panel-fx-in');
   runAttackTrail(fx);
+  const gs = document.getElementById('game-screen');
+  if (gs?.classList.contains('active')) {
+    gs.classList.remove('screen-quake');
+    void gs.offsetWidth;
+    gs.classList.add('screen-quake');
+    setTimeout(() => gs.classList.remove('screen-quake'), 920);
+  }
   const bw = document.querySelector('#game-screen .board-wrap');
   if (from === socket.id && bw) {
     bw.classList.remove('board-fx-out');

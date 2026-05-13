@@ -82,7 +82,7 @@ class AIEvaluator {
 
 // ── AI 봇 클래스 ─────────────────────────────────────────────
 class AIBot {
-  constructor(canvas, nextCanvas, stage, onAttack, onGameOver, onStateChange) {
+  constructor(canvas, nextCanvas, stage, onAttack, onGameOver, onStateChange, botOpts = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.nextCanvas = nextCanvas;
@@ -92,6 +92,8 @@ class AIBot {
     this.onAttack = onAttack;
     this.onGameOver = onGameOver;
     this.onStateChange = onStateChange;
+    this.botOpts = botOpts || {};
+    this.thinkCapMs = this.botOpts.thinkCapMs != null ? this.botOpts.thinkCapMs : null;
 
     this.board = this._emptyBoard();
     this.current = null;
@@ -104,6 +106,10 @@ class AIBot {
     this.bag = [];
     this.thinkTimer = null;
     this.targetMove = null; // { x, rotations }
+    this.movePhase = 'think';
+    this.pendingRots = 0;
+    this.pendingX = 0;
+    this.moveStepAccum = 0;
     this.animFrame = null;
     this.lastTime = 0;
     this.dropAccum = 0;
@@ -131,6 +137,11 @@ class AIBot {
     this.level = this.stage;
     this.gameOver = false; this.running = true;
     this.bag = [];
+    this.movePhase = 'think';
+    this.pendingRots = 0;
+    this.pendingX = 0;
+    this.moveStepAccum = 0;
+    this.dropAccum = 0;
     this.next = this._spawnPiece(this._getFromBag());
     this._spawn();
     this.lastTime = performance.now();
@@ -143,6 +154,12 @@ class AIBot {
     if (this.animFrame) cancelAnimationFrame(this.animFrame);
   }
 
+  _effectiveThinkDelay() {
+    const d = this.profile.thinkDelay;
+    if (this.thinkCapMs == null) return d;
+    return Math.min(d, this.thinkCapMs);
+  }
+
   _spawn() {
     this.current = this.next;
     this.next = this._spawnPiece(this._getFromBag());
@@ -153,9 +170,11 @@ class AIBot {
       return;
     }
     this._drawNext();
-    // AI 생각 시작
+    this.movePhase = 'think';
+    this.dropAccum = 0;
+    this.moveStepAccum = 0;
     if (this.thinkTimer) clearTimeout(this.thinkTimer);
-    this.thinkTimer = setTimeout(() => this._think(), this.profile.thinkDelay);
+    this.thinkTimer = setTimeout(() => this._think(), this._effectiveThinkDelay());
   }
 
   // ── AI 사고 ──
@@ -176,7 +195,10 @@ class AIBot {
       this.targetMove = this._findBestMove();
     }
 
-    this._executeMove();
+    this.pendingRots = this.targetMove.rotations;
+    this.pendingX = this.targetMove.x;
+    this.movePhase = 'adjust';
+    this.moveStepAccum = 0;
   }
 
   _findBestMove() {
@@ -219,32 +241,6 @@ class AIBot {
     return b;
   }
 
-  // 목표 위치로 이동 실행
-  _executeMove() {
-    if (!this.running || !this.targetMove) return;
-    // 회전
-    for (let i = 0; i < this.targetMove.rotations; i++) {
-      this._doRotate();
-    }
-    // 목표 x로 이동
-    const targetX = this.targetMove.x;
-    const step = targetX > this.current.x ? 1 : -1;
-    while (this.current.x !== targetX) {
-      const nx = this.current.x + step;
-      if (this._collides(this.current.shape, nx, this.current.y)) break;
-      this.current.x = nx;
-    }
-    // 하드드롭
-    this._hardDrop();
-  }
-
-  _hardDrop() {
-    while (!this._collides(this.current.shape, this.current.x, this.current.y + 1)) {
-      this.current.y++;
-    }
-    this._lock();
-  }
-
   _doRotate() {
     const rotated = this._rotate(this.current.shape);
     if (!this._collides(rotated, this.current.x, this.current.y)) {
@@ -279,6 +275,14 @@ class AIBot {
     return cleared;
   }
 
+  _hardDropPiece() {
+    if (!this.running || !this.current) return;
+    while (!this._collides(this.current.shape, this.current.x, this.current.y + 1)) {
+      this.current.y++;
+    }
+    this._lock();
+  }
+
   _collides(shape, px, py) {
     for (let r = 0; r < shape.length; r++) {
       for (let c = 0; c < shape[r].length; c++) {
@@ -302,6 +306,36 @@ class AIBot {
 
   _loop(ts) {
     if (!this.running) return;
+    const delta = Math.min(90, ts - this.lastTime);
+    this.lastTime = ts;
+
+    if (this.movePhase === 'adjust') {
+      this.moveStepAccum += delta;
+      const stepMs = Math.max(18, 56 - this.stage * 5);
+      while (this.movePhase === 'adjust' && this.moveStepAccum >= stepMs) {
+        this.moveStepAccum -= stepMs;
+        if (this.pendingRots > 0) {
+          this._doRotate();
+          this.pendingRots--;
+          continue;
+        }
+        if (this.current.x < this.pendingX) {
+          const nx = this.current.x + 1;
+          if (!this._collides(this.current.shape, nx, this.current.y)) this.current.x = nx;
+          else break;
+          continue;
+        }
+        if (this.current.x > this.pendingX) {
+          const nx = this.current.x - 1;
+          if (!this._collides(this.current.shape, nx, this.current.y)) this.current.x = nx;
+          else break;
+          continue;
+        }
+        this._hardDropPiece();
+        break;
+      }
+    }
+
     this._draw();
     if (this.onStateChange) this.onStateChange(this._getState());
     this.animFrame = requestAnimationFrame(this._loop.bind(this));
@@ -309,7 +343,7 @@ class AIBot {
 
   _draw() {
     const ctx = this.ctx;
-    const B = OPP_BLOCK;
+    const B = Math.max(1, Math.floor((this.canvas && this.canvas.width) / COLS)) || OPP_BLOCK;
     ctx.fillStyle = '#050510';
     ctx.fillRect(0, 0, COLS * B, ROWS * B);
     this.board.forEach((row, r) => row.forEach((v, c) => {
