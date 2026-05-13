@@ -293,7 +293,7 @@ function endSoloGame(score, lines) {
   document.getElementById('solo-final-lines').textContent = lines;
 
   // 랭킹 등록
-  socket.emit('game:myover', { score, lines });
+  socket.emit('solo:submit', { score, lines });
 
   overlay.classList.add('show');
 }

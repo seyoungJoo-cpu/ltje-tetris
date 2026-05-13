@@ -9,9 +9,48 @@ let myRoomId = null;
 let myRoomData = null;
 let isReady = false;
 let tetris = null;
-let opponentCanvases = {};  // socketId → canvas
+let opponentCanvases = {};
+let pendingJoinRoomId = null;
+const onlineHostBots = {};
 
-// showScreen은 index.html 인라인 스크립트에 정의됨
+function stopHostOnlineBots() {
+  Object.keys(onlineHostBots).forEach((k) => {
+    try { onlineHostBots[k].stop(); } catch (e) { /* ignore */ }
+    delete onlineHostBots[k];
+  });
+  const root = document.getElementById('online-bot-root');
+  if (root) root.innerHTML = '';
+}
+
+function spawnHostAiBots(playersList) {
+  stopHostOnlineBots();
+  if (!myRoomData || myRoomData.host !== socket.id) return;
+  const root = document.getElementById('online-bot-root');
+  if (!root) return;
+  const lastEmit = {};
+  playersList.filter((p) => p.isBot).forEach((p) => {
+    const c = document.createElement('canvas');
+    c.width = 100;
+    c.height = 200;
+    root.appendChild(c);
+    const stage = Math.min(7, Math.max(1, parseInt(p.stage, 10) || 3));
+    const bot = new AIBot(
+      c,
+      null,
+      stage,
+      (lines) => { socket.emit('game:botAttack', { botId: p.id, lines }); },
+      (score, lines) => { socket.emit('game:botOver', { botId: p.id, score, lines }); },
+      (state) => {
+        const now = performance.now();
+        if ((now - (lastEmit[p.id] || 0)) < 22) return;
+        lastEmit[p.id] = now;
+        socket.emit('game:botState', { botId: p.id, state });
+      }
+    );
+    onlineHostBots[p.id] = bot;
+    bot.start();
+  });
+}
 
 // ── 닉네임 입력 → 로비 진입 ──
 function enterLobby() {
@@ -38,9 +77,9 @@ function renderRoomList(rooms) {
   }
   el.innerHTML = rooms.map(r => `
     <div class="room-card ${r.status === 'playing' ? 'playing' : ''} ${r.players >= r.maxPlayers ? 'full' : ''}"
-         onclick="joinRoom('${r.id}')">
+         data-rid="${escHtml(r.id)}" data-locked="${r.hasPassword ? '1' : '0'}">
       <div>
-        <div class="room-name">${escHtml(r.name)}</div>
+        <div class="room-name">${escHtml(r.name)}${r.hasPassword ? ' <span class="lock-hint">🔒</span>' : ''}</div>
         <div class="room-info">${escHtml(r.modeLabel || 'FFA')} · ${r.players}/${r.maxPlayers}명</div>
       </div>
       <div class="room-status ${r.status === 'playing' ? 'status-playing' : 'status-waiting'}">
@@ -49,6 +88,20 @@ function renderRoomList(rooms) {
     </div>
   `).join('');
 }
+
+document.getElementById('room-list')?.addEventListener('click', (ev) => {
+  const card = ev.target.closest('.room-card');
+  if (!card || myRoomId) return;
+  const rid = card.dataset.rid;
+  if (!rid) return;
+  if (card.dataset.locked === '1') {
+    pendingJoinRoomId = rid;
+    document.getElementById('join-pass-input').value = '';
+    document.getElementById('join-pass-modal').classList.add('open');
+  } else {
+    joinRoom(rid, '');
+  }
+});
 
 // ── 방 만들기 ──
 function showCreateRoom() {
@@ -70,19 +123,36 @@ function createRoom() {
   const max = parseInt(document.getElementById('max-players-select').value, 10);
   const showGhost = document.getElementById('room-ghost-check').checked;
   const gameMode = document.getElementById('room-game-mode')?.value || 'ffa';
+  const roomName = document.getElementById('room-title-input')?.value || '';
+  const password = document.getElementById('room-password-input')?.value || '';
   if (typeof gameOptions !== 'undefined') gameOptions.showGhost = showGhost;
-  socket.emit('room:create', { maxPlayers: max, showGhost, gameMode });
+  socket.emit('room:create', { maxPlayers: max, showGhost, gameMode, roomName, password });
   closeModal();
 }
 
-// ── 방 참가 ──
-function joinRoom(roomId) {
+function joinRoom(roomId, password) {
   if (myRoomId) return;
-  socket.emit('room:join', roomId);
+  socket.emit('room:join', { roomId, password: password || '' });
 }
+
+function closeJoinPassModal() {
+  document.getElementById('join-pass-modal')?.classList.remove('open');
+  pendingJoinRoomId = null;
+}
+
+function confirmJoinPass() {
+  if (!pendingJoinRoomId) return;
+  const pwd = document.getElementById('join-pass-input')?.value || '';
+  joinRoom(pendingJoinRoomId, pwd);
+  closeJoinPassModal();
+}
+
+window.closeJoinPassModal = closeJoinPassModal;
+window.confirmJoinPass = confirmJoinPass;
 
 // ── 방 나가기 ──
 function leaveRoom() {
+  stopHostOnlineBots();
   socket.emit('room:leave');
   myRoomId = null;
   myRoomData = null;
@@ -132,21 +202,43 @@ function renderRoom(room) {
   myRoomData = room;
   document.getElementById('room-name-display').textContent = room.name;
   const modeLabel = room.gameMode === 'team2' ? '2v2 팀전' : room.gameMode === 'team3' ? '3v3 팀전' : 'FFA';
-  document.getElementById('room-name-display').title = modeLabel;
+  document.getElementById('room-name-display').title = modeLabel + (room.hasPassword ? ' · 비밀방' : '');
   const playersEl = document.getElementById('room-players');
   const teams = room.teams;
+  const hostPanel = document.getElementById('room-host-panel');
+  if (hostPanel) {
+    const showHost = room.host === socket.id && room.status === 'waiting';
+    hostPanel.style.display = showHost ? 'block' : 'none';
+  }
+
   playersEl.innerHTML = room.players.map(p => {
-    let teamHtml = '';
-    if (teams && teams[p.id] !== undefined) {
-      const ta = teams[p.id] === 0;
-      teamHtml = `<div class="player-team-tag ${ta ? 'ta' : 'tb'}">${ta ? '🅰 팀 A' : '🅱 팀 B'}</div>`;
-    }
+    const isBot = p.isBot;
+    const teamHtml = teams && teams[p.id] !== undefined
+      ? `<div class="player-team-tag ${teams[p.id] === 0 ? 'ta' : 'tb'}">${teams[p.id] === 0 ? '🅰 팀 A' : '🅱 팀 B'}</div>`
+      : '';
     const teamClass = teams && teams[p.id] === 0 ? 'team-a' : teams && teams[p.id] === 1 ? 'team-b' : '';
+    const selfPick = !isBot && teams && p.id === socket.id && room.status === 'waiting'
+      ? `<div class="team-pick-row">
+          <button type="button" data-team-set="0" class="${teams[p.id] === 0 ? 'active-a' : ''}">팀 A</button>
+          <button type="button" data-team-set="1" class="${teams[p.id] === 1 ? 'active-b' : ''}">팀 B</button>
+        </div>`
+      : '';
+    const botControls = isBot && room.host === socket.id && room.status === 'waiting'
+      ? `<div class="bot-admin-row">
+          <select data-bot-team-select="${escHtml(p.id)}" class="host-bot-select">
+            <option value="0" ${teams && teams[p.id] === 0 ? 'selected' : ''}>팀 A</option>
+            <option value="1" ${teams && teams[p.id] === 1 ? 'selected' : ''}>팀 B</option>
+          </select>
+          <button type="button" class="btn btn-danger btn-sm" data-bot-remove="${escHtml(p.id)}">AI 제거</button>
+        </div>`
+      : '';
     return `
-    <div class="player-card ${p.ready ? 'ready' : ''} ${p.id === room.host ? 'host' : ''} ${teamClass}">
-      <div class="player-avatar">${escHtml(p.nickname.charAt(0).toUpperCase())}</div>
-      <div class="player-nick">${escHtml(p.nickname)}</div>
+    <div class="player-card ${p.ready ? 'ready' : ''} ${p.id === room.host ? 'host' : ''} ${teamClass} ${isBot ? 'is-bot' : ''}">
+      <div class="player-avatar">${escHtml((p.nickname || '?').charAt(0).toUpperCase())}</div>
+      <div class="player-nick">${escHtml(p.nickname)}${isBot ? ' <small>(AI)</small>' : ''}</div>
       ${teamHtml}
+      ${selfPick}
+      ${botControls}
       <div class="${p.ready ? 'player-ready-badge' : 'player-waiting-badge'}">
         ${p.ready ? '레디 완료' : '대기중'}
       </div>
@@ -155,6 +247,32 @@ function renderRoom(room) {
   }).join('');
   syncRoomShowGhost(room);
 }
+
+document.getElementById('room-players')?.addEventListener('click', (e) => {
+  const ts = e.target.closest('[data-team-set]');
+  if (ts && myRoomData?.status === 'waiting') {
+    socket.emit('room:setTeam', { team: parseInt(ts.dataset.teamSet, 10) });
+    return;
+  }
+  const rm = e.target.closest('[data-bot-remove]');
+  if (rm && myRoomData?.host === socket.id) {
+    socket.emit('room:removeBot', { botId: rm.dataset.botRemove });
+  }
+});
+
+document.getElementById('room-players')?.addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-bot-team-select]');
+  if (!sel || myRoomData?.host !== socket.id) return;
+  socket.emit('room:setBotTeam', { botId: sel.dataset.botTeamSelect, team: parseInt(sel.value, 10) });
+});
+
+document.getElementById('room-host-panel')?.addEventListener('click', (e) => {
+  const add = e.target.closest('[data-add-bot]');
+  if (!add || myRoomData?.host !== socket.id) return;
+  const team = parseInt(add.dataset.addBot, 10);
+  const stage = parseInt(document.getElementById('room-bot-stage')?.value, 10) || 3;
+  socket.emit('room:addBot', { team, stage });
+});
 
 // ── 랭킹 렌더 ──
 function renderRanking(data) {
@@ -225,7 +343,7 @@ function startGame(players, showGhost) {
     wrap.id = `opp-wrap-${p.id}`;
     wrap.innerHTML = `
       <div class="opponent-panel">
-        <div class="player-label">${escHtml(p.nickname)}</div>
+        <div class="player-label">${escHtml(p.nickname)}${p.isBot ? ' 🤖' : ''}</div>
         <canvas class="opp-canvas" id="opp-${p.id}" width="${10 * 10}" height="${20 * 10}"></canvas>
       </div>
     `;
@@ -263,6 +381,7 @@ function startGame(players, showGhost) {
   );
   tetris.start();
   if (myRoomData) syncRoomShowGhost(myRoomData);
+  spawnHostAiBots(players);
 }
 
 function pulseOppFx(socketId, cls) {
@@ -277,6 +396,7 @@ function pulseOppFx(socketId, cls) {
 // ── 게임 오버 처리 ──
 function showGameOver(payload) {
   const { winnerId, winnerNick, reason, isTeamGame, winnerTeam } = payload;
+  stopHostOnlineBots();
   if (tetris) tetris.stop();
   const overlay = document.getElementById('gameover-overlay');
   const title = document.getElementById('gameover-title');
@@ -329,12 +449,108 @@ function escHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+function normalizePenaltyPayload(p) {
+  if (!p) return { kind: 'rows', lines: 1 };
+  if (p.kind) return p;
+  if (p.lines != null) return { kind: 'rows', lines: p.lines };
+  return { kind: 'rows', lines: 1 };
+}
+
+function penaltyFlashIntensity(pen) {
+  if (!pen) return 1;
+  const p = pen.power || 1;
+  switch (pen.kind) {
+    case 'shower':
+      return Math.min(12, 4 + Math.floor((pen.blocks || 12) / 4));
+    case 'meteor':
+      return Math.min(10, 2 + (pen.meteors || 1) * 2);
+    case 'columns':
+      return Math.min(10, 1 + (pen.cols || 2) * (pen.depth || 3));
+    case 'split':
+    case 'cheese':
+    case 'rows':
+    default:
+      return Math.max(1, pen.lines || p);
+  }
+}
+
+function resolveAttackFxAnchor(id) {
+  if (id === socket.id) return document.querySelector('#game-screen .board-wrap');
+  return document.getElementById('opp-wrap-' + id);
+}
+
+function ensureAttackFxRoot() {
+  let root = document.getElementById('attack-fx-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'attack-fx-root';
+    document.body.appendChild(root);
+  }
+  return root;
+}
+
+function runAttackTrail(fx) {
+  const gs = document.getElementById('game-screen');
+  if (!gs?.classList.contains('active')) return;
+  const { from, to, lines, kind, fromNick, toNick } = fx;
+  const fromEl = resolveAttackFxAnchor(from);
+  const toEl = resolveAttackFxAnchor(to);
+  if (!fromEl || !toEl) return;
+  const a = fromEl.getBoundingClientRect();
+  const b = toEl.getBoundingClientRect();
+  const cx1 = a.left + a.width / 2;
+  const cy1 = a.top + a.height / 2;
+  const cx2 = b.left + b.width / 2;
+  const cy2 = b.top + b.height / 2;
+  const dx = cx2 - cx1;
+  const dy = cy2 - cy1;
+  const dist = Math.max(40, Math.hypot(dx, dy));
+  const ang = (Math.atan2(dy, dx) * 180) / Math.PI;
+  const root = ensureAttackFxRoot();
+  const beam = document.createElement('div');
+  beam.className = 'attack-beam beam-kind-' + (kind || 'rows');
+  beam.style.left = cx1 + 'px';
+  beam.style.top = cy1 - 8 + 'px';
+  beam.style.width = dist + 'px';
+  beam.style.transform = `rotate(${ang}deg)`;
+  root.appendChild(beam);
+
+  const burst = document.createElement('div');
+  burst.className = 'attack-burst';
+  burst.style.left = cx2 - 48 + 'px';
+  burst.style.top = cy2 - 48 + 'px';
+  burst.innerHTML = `<span class="burst-ring"></span><span class="burst-core"></span>
+    <span class="burst-label">${escHtml(fromNick || '')} → ${escHtml(toNick || '')}</span>`;
+  root.appendChild(burst);
+
+  setTimeout(() => {
+    beam.remove();
+    burst.remove();
+  }, 900);
+}
+
+function runIncomingPenaltyVfx(penalty) {
+  const bw = document.querySelector('#game-screen .board-wrap');
+  if (!bw) return;
+  bw.classList.remove('penalty-hit-vfx');
+  void bw.offsetWidth;
+  bw.classList.add('penalty-hit-vfx');
+  const k = (penalty && penalty.kind) || 'rows';
+  bw.setAttribute('data-pen-kind', k);
+  setTimeout(() => {
+    bw.classList.remove('penalty-hit-vfx');
+    bw.removeAttribute('data-pen-kind');
+  }, 950);
+}
+
 // ── 소켓 이벤트 ──
 socket.on('lobby:rooms', renderRoomList);
 socket.on('ranking:update', renderRanking);
 
 socket.on('room:joined', (room) => {
   myRoomId = room.id;
+  document.getElementById('join-pass-modal')?.classList.remove('open');
+  pendingJoinRoomId = null;
   renderRoom(room);
   // 방마다 채팅 리셋
   document.getElementById('room-chat').innerHTML = '';
@@ -360,30 +576,55 @@ socket.on('game:opponent', ({ id, state }) => {
   drawOpponentBoard(opponentCanvases[id], state);
 });
 
-socket.on('game:attackFx', ({ from, to, lines }) => {
+socket.on('game:attackFx', (fx) => {
+  const { from, to, lines, kind } = fx;
   pulseOppFx(from, 'panel-fx-out');
   pulseOppFx(to, 'panel-fx-in');
+  runAttackTrail(fx);
   const bw = document.querySelector('#game-screen .board-wrap');
   if (from === socket.id && bw) {
     bw.classList.remove('board-fx-out');
     void bw.offsetWidth;
     bw.classList.add('board-fx-out');
-    setTimeout(() => bw.classList.remove('board-fx-out'), 500);
+    setTimeout(() => bw.classList.remove('board-fx-out'), 520);
+  }
+  if (to === socket.id && bw) {
+    bw.classList.remove('board-fx-in-hit');
+    void bw.offsetWidth;
+    bw.classList.add('board-fx-in-hit');
+    setTimeout(() => bw.classList.remove('board-fx-in-hit'), 480);
   }
   if (typeof flashAttack === 'function' && to !== socket.id && from !== socket.id) {
-    flashAttack(lines, { subtle: true });
+    flashAttack(lines, { subtle: true, kind });
   }
 });
 
-socket.on('game:garbage', ({ from, lines }) => {
+socket.on('game:garbage', (payload) => {
+  const pen = normalizePenaltyPayload(payload);
   if (tetris && tetris.running) {
-    tetris.addGarbage(lines);
-    if (typeof flashAttack === 'function') flashAttack(lines, { shake: true });
+    runIncomingPenaltyVfx(pen);
+    if (typeof flashAttack === 'function') flashAttack(penaltyFlashIntensity(pen), { kind: pen.kind, incoming: true });
+    tetris.applyPenalty(pen);
     const gs = document.getElementById('game-screen');
     if (gs) {
       gs.classList.add('screen-shake');
-      setTimeout(() => gs.classList.remove('screen-shake'), 420);
+      gs.classList.add('screen-shake-hard');
+      setTimeout(() => {
+        gs.classList.remove('screen-shake');
+        gs.classList.remove('screen-shake-hard');
+      }, 520);
     }
+  }
+});
+
+socket.on('game:garbageBot', (payload) => {
+  if (myRoomData?.host !== socket.id) return;
+  const pen = normalizePenaltyPayload(payload);
+  const bot = onlineHostBots[payload.botId];
+  if (bot && typeof bot.applyPenalty === 'function') {
+    runIncomingPenaltyVfx(pen);
+    if (typeof flashAttack === 'function') flashAttack(penaltyFlashIntensity(pen), { kind: pen.kind, incoming: true });
+    bot.applyPenalty(pen);
   }
 });
 

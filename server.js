@@ -14,9 +14,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ── 인메모리 상태 ──────────────────────────────────────────
 const players = {};   // socketId → { nickname, roomId }
 const rooms   = {};   // roomId  → Room 객체
-const ranking = [];   // [{ nickname, score, lines, date }]
+// 닉네임별 솔로 모드 최고 점수만 유지
+const soloBestByNick = {};
 
 let roomCounter = 1;
+let botIdCounter = 1;
 
 function normalizeGameMode(mode) {
   if (mode === 'team2') return 'team2';
@@ -24,37 +26,77 @@ function normalizeGameMode(mode) {
   return 'ffa';
 }
 
-function createRoom(hostId, hostNick, maxPlayers, showGhost = true, gameMode = 'ffa') {
+function isBotId(id) {
+  return typeof id === 'string' && id.startsWith('bot_');
+}
+
+function allSlotIds(room) {
+  return [...room.players, ...(room.bots || []).map((b) => b.id)];
+}
+
+function countTeam(room, team) {
+  let n = 0;
+  for (const id of room.players) {
+    if ((room.playerTeams[id] ?? 0) === team) n++;
+  }
+  for (const b of room.bots || []) {
+    if (b.team === team) n++;
+  }
+  return n;
+}
+
+function teamCountsPair(room) {
+  return [countTeam(room, 0), countTeam(room, 1)];
+}
+
+function buildTeamMap(room) {
+  if (room.gameMode === 'ffa') return undefined;
+  const m = {};
+  for (const id of room.players) m[id] = room.playerTeams[id] ?? 0;
+  for (const b of room.bots || []) m[b.id] = b.team;
+  return m;
+}
+
+function roomOccupancy(room) {
+  return room.players.length + (room.bots || []).length;
+}
+
+function removeAllBots(room) {
+  if (!room.bots?.length) return;
+  for (const b of room.bots) {
+    delete room.playerTeams[b.id];
+    delete room.gameStates[b.id];
+  }
+  room.bots = [];
+}
+
+function createRoom(hostId, hostNick, maxPlayers, showGhost = true, gameMode = 'ffa', roomName, password) {
   const mode = normalizeGameMode(gameMode);
   const max =
     mode === 'team2' ? 4
     : mode === 'team3' ? 6
     : Math.min(Math.max(parseInt(maxPlayers, 10) || 2, 2), 6);
   const roomId = `room_${roomCounter++}`;
+  const rawName = roomName != null ? String(roomName).trim().slice(0, 32) : '';
+  const name = rawName || `${hostNick}의 방`;
+  const pwdRaw = password != null ? String(password).trim().slice(0, 24) : '';
+  const pwd = pwdRaw.length ? pwdRaw : null;
   rooms[roomId] = {
     id: roomId,
-    name: `${hostNick}의 방`,
+    name,
+    password: pwd,
     host: hostId,
     maxPlayers: max,
     players: [hostId],
-    status: 'waiting',   // waiting | playing | finished
-    gameStates: {},      // socketId → board/score state
+    bots: [],
+    status: 'waiting',
+    gameStates: {},
     readySet: new Set(),
     showGhost: showGhost !== false,
     gameMode: mode,
-    playerTeams: {},     // socketId → 0 | 1 (팀전)
+    playerTeams: mode !== 'ffa' ? { [hostId]: 0 } : {},
   };
   return roomId;
-}
-
-function recomputeTeams(room) {
-  room.playerTeams = {};
-  if (room.gameMode !== 'team2' && room.gameMode !== 'team3') return;
-  const ordered = [...room.players];
-  const half = room.gameMode === 'team2' ? 2 : 3;
-  ordered.forEach((id, i) => {
-    room.playerTeams[id] = i < half ? 0 : 1;
-  });
 }
 
 function roomModeLabel(mode) {
@@ -67,11 +109,12 @@ function getRoomList() {
   return Object.values(rooms).map(r => ({
     id: r.id,
     name: r.name,
-    players: r.players.length,
+    players: roomOccupancy(r),
     maxPlayers: r.maxPlayers,
     status: r.status,
     gameMode: r.gameMode || 'ffa',
     modeLabel: roomModeLabel(r.gameMode || 'ffa'),
+    hasPassword: !!r.password,
   }));
 }
 
@@ -88,19 +131,20 @@ function removePlayerFromRoom(socketId) {
   if (room.players.length === 0) {
     delete rooms[p.roomId];
   } else {
-    // 방장 교체
-    if (room.host === socketId) room.host = room.players[0];
+    if (room.host === socketId) {
+      room.host = room.players[0];
+      removeAllBots(room);
+    }
 
     // 게임 중이었으면 남은 사람/팀 승리처리
     if (room.status === 'playing') {
-      recomputeTeams(room);
       const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
       if (isTeam) {
-        const alive0 = room.players.filter(
-          id => room.playerTeams[id] === 0 && !room.gameStates[id]?.over
+        const alive0 = allSlotIds(room).filter(
+          id => (room.playerTeams[id] ?? 0) === 0 && !room.gameStates[id]?.over
         );
-        const alive1 = room.players.filter(
-          id => room.playerTeams[id] === 1 && !room.gameStates[id]?.over
+        const alive1 = allSlotIds(room).filter(
+          id => (room.playerTeams[id] ?? 0) === 1 && !room.gameStates[id]?.over
         );
         if (alive0.length === 0 && alive1.length > 0) {
           const rep = alive1[0];
@@ -126,7 +170,7 @@ function removePlayerFromRoom(socketId) {
           room.status = 'waiting';
           room.readySet.clear();
           room.gameStates = {};
-        } else if (room.players.length === 1) {
+        } else if (room.players.length === 1 && !room.bots?.length) {
           const winnerId = room.players[0];
           const winnerNick = players[winnerId]?.nickname || '?';
           io.to(p.roomId).emit('game:over', { winnerId, winnerNick, reason: '상대방 접속 종료' });
@@ -134,7 +178,7 @@ function removePlayerFromRoom(socketId) {
           room.readySet.clear();
           room.gameStates = {};
         }
-      } else if (room.players.length === 1) {
+      } else if (room.players.length === 1 && !room.bots?.length) {
         const winnerId = room.players[0];
         const winnerNick = players[winnerId]?.nickname || '?';
         io.to(p.roomId).emit('game:over', { winnerId, winnerNick, reason: '상대방 접속 종료' });
@@ -150,21 +194,27 @@ function removePlayerFromRoom(socketId) {
 }
 
 function sanitizeRoom(room) {
-  recomputeTeams(room);
-  const teams =
-    room.gameMode === 'ffa'
-      ? undefined
-      : Object.fromEntries(room.players.map((id) => [id, room.playerTeams[id] ?? 0]));
+  const teams = buildTeamMap(room);
+  const humanPlayers = room.players.map((id) => ({
+    id,
+    nickname: players[id]?.nickname || '?',
+    ready: room.readySet.has(id),
+    isBot: false,
+  }));
+  const botPlayers = (room.bots || []).map((b) => ({
+    id: b.id,
+    nickname: b.nickname,
+    ready: true,
+    isBot: true,
+    stage: b.stage,
+  }));
   return {
     id: room.id,
     name: room.name,
+    hasPassword: !!room.password,
     host: room.host,
     maxPlayers: room.maxPlayers,
-    players: room.players.map(id => ({
-      id,
-      nickname: players[id]?.nickname || '?',
-      ready: room.readySet.has(id),
-    })),
+    players: [...humanPlayers, ...botPlayers],
     status: room.status,
     showGhost: !!room.showGhost,
     gameMode: room.gameMode || 'ffa',
@@ -172,20 +222,35 @@ function sanitizeRoom(room) {
   };
 }
 
-function addRanking(nickname, score, lines) {
-  ranking.push({ nickname, score, lines, date: new Date().toLocaleDateString('ko-KR') });
-  ranking.sort((a, b) => b.score - a.score);
-  if (ranking.length > 50) ranking.length = 50;
+function submitSoloScore(nickname, score, lines) {
+  const nick = String(nickname || '?').trim().slice(0, 12) || '?';
+  const sc = Math.max(0, parseInt(score, 10) || 0);
+  const ln = Math.max(0, parseInt(lines, 10) || 0);
+  const prev = soloBestByNick[nick];
+  if (!prev || sc > prev.score) {
+    soloBestByNick[nick] = {
+      nickname: nick,
+      score: sc,
+      lines: ln,
+      date: new Date().toLocaleDateString('ko-KR'),
+    };
+  }
+}
+
+function getSoloRankingSlice(n) {
+  return Object.values(soloBestByNick)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, n);
 }
 
 function pickGarbageTarget(room, attackerId) {
-  const others = room.players.filter((id) => id !== attackerId);
+  const others = allSlotIds(room).filter((id) => id !== attackerId);
+  const myTeam = room.playerTeams[attackerId] ?? 0;
   let pool;
   if (room.gameMode === 'team2' || room.gameMode === 'team3') {
-    const myTeam = room.playerTeams[attackerId];
     pool = others.filter(
       (id) =>
-        room.playerTeams[id] !== myTeam &&
+        (room.playerTeams[id] ?? 0) !== myTeam &&
         !room.gameStates[id]?.over
     );
   } else {
@@ -193,6 +258,117 @@ function pickGarbageTarget(room, attackerId) {
   }
   if (pool.length === 0) return null;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function resolveSlotNickname(room, id) {
+  if (isBotId(id)) {
+    const b = room.bots?.find((x) => x.id === id);
+    return b?.nickname || 'AI';
+  }
+  return players[id]?.nickname || '?';
+}
+
+function rollPenaltyPayload(power) {
+  const p = Math.max(1, Math.min(12, parseInt(power, 10) || 1));
+  const r = Math.random();
+  if (r < 0.28) return { kind: 'rows', lines: p };
+  if (r < 0.48) return { kind: 'cheese', lines: Math.min(8, Math.max(2, p)) };
+  if (r < 0.64) return { kind: 'split', lines: p };
+  if (r < 0.78) return { kind: 'meteor', meteors: Math.min(6, Math.max(1, Math.ceil(p / 2))) };
+  if (r < 0.90) {
+    return {
+      kind: 'columns',
+      cols: Math.min(4, Math.max(2, 1 + Math.floor(p / 4))),
+      depth: Math.min(6, Math.max(2, 2 + (p % 4))),
+    };
+  }
+  return { kind: 'shower', blocks: Math.min(18, 5 + p * 2) };
+}
+
+function emitGarbageToTarget(io, room, roomId, fromId, targetId, n) {
+  const fromNick = resolveSlotNickname(room, fromId);
+  const toNick = resolveSlotNickname(room, targetId);
+  const penalty = rollPenaltyPayload(n);
+  const payload = { from: fromId, power: n, ...penalty };
+  if (isBotId(targetId)) {
+    io.to(room.host).emit('game:garbageBot', { botId: targetId, ...payload });
+  } else {
+    io.to(targetId).emit('game:garbage', payload);
+  }
+  io.to(roomId).emit('game:attackFx', {
+    from: fromId,
+    to: targetId,
+    lines: n,
+    kind: penalty.kind,
+    fromNick,
+    toNick,
+  });
+}
+
+function endRoundAndReset(room, roomId) {
+  room.status = 'waiting';
+  room.readySet.clear();
+  room.gameStates = {};
+  io.emit('lobby:rooms', getRoomList());
+  io.to(roomId).emit('room:update', sanitizeRoom(room));
+}
+
+function maybeTeamOrFfaWin(room, roomId) {
+  const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
+  if (isTeam) {
+    const alive0 = allSlotIds(room).filter(
+      (id) => (room.playerTeams[id] ?? 0) === 0 && !room.gameStates[id]?.over
+    );
+    const alive1 = allSlotIds(room).filter(
+      (id) => (room.playerTeams[id] ?? 0) === 1 && !room.gameStates[id]?.over
+    );
+    if (alive0.length === 0 && alive1.length > 0) {
+      const rep = alive1[0];
+      io.to(roomId).emit('game:over', {
+        winnerId: rep,
+        winnerNick: '🅱 팀 B 승리!',
+        winnerTeam: 1,
+        isTeamGame: true,
+        reason: '게임 종료',
+      });
+      endRoundAndReset(room, roomId);
+      return true;
+    }
+    if (alive1.length === 0 && alive0.length > 0) {
+      const rep = alive0[0];
+      io.to(roomId).emit('game:over', {
+        winnerId: rep,
+        winnerNick: '🅰 팀 A 승리!',
+        winnerTeam: 0,
+        isTeamGame: true,
+        reason: '게임 종료',
+      });
+      endRoundAndReset(room, roomId);
+      return true;
+    }
+    return false;
+  }
+  const aliveAll = allSlotIds(room).filter((id) => !room.gameStates[id]?.over);
+  if (aliveAll.length <= 1) {
+    const winnerId = aliveAll[0] || null;
+    const winnerNick = winnerId ? resolveSlotNickname(room, winnerId) : '없음';
+    io.to(roomId).emit('game:over', { winnerId, winnerNick, reason: '게임 종료' });
+    endRoundAndReset(room, roomId);
+    return true;
+  }
+  return false;
+}
+
+function canStartGame(room) {
+  if (!room.players.every((id) => room.readySet.has(id))) return false;
+  const occ = roomOccupancy(room);
+  const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
+  if (isTeam) {
+    if (occ !== room.maxPlayers) return false;
+    const [c0, c1] = teamCountsPair(room);
+    return c0 === room.maxPlayers / 2 && c1 === room.maxPlayers / 2;
+  }
+  return occ >= 2;
 }
 
 // ── Socket.io ──────────────────────────────────────────────
@@ -204,17 +380,17 @@ io.on('connection', (socket) => {
   socket.on('lobby:join', (nickname) => {
     players[socket.id].nickname = nickname.trim().slice(0, 12);
     socket.emit('lobby:rooms', getRoomList());
-    socket.emit('ranking:update', ranking.slice(0, 20));
+    socket.emit('ranking:update', getSoloRankingSlice(20));
   });
 
   // 방 만들기
-  socket.on('room:create', ({ maxPlayers, showGhost, gameMode }) => {
+  socket.on('room:create', ({ maxPlayers, showGhost, gameMode, roomName, password }) => {
     if (players[socket.id].roomId) return;
     const nick = players[socket.id].nickname;
     const mode = normalizeGameMode(gameMode);
     const maxReq = mode === 'ffa' ? Math.min(Math.max(parseInt(maxPlayers, 10) || 2, 2), 6) : (mode === 'team2' ? 4 : 6);
     const ghostOpt = showGhost === false ? false : true;
-    const roomId = createRoom(socket.id, nick, maxReq, ghostOpt, mode);
+    const roomId = createRoom(socket.id, nick, maxReq, ghostOpt, mode, roomName, password);
     players[socket.id].roomId = roomId;
     socket.join(roomId);
     socket.emit('room:joined', sanitizeRoom(rooms[roomId]));
@@ -231,15 +407,81 @@ io.on('connection', (socket) => {
     io.to(p.roomId).emit('room:update', sanitizeRoom(room));
   });
 
+  // 팀 선택 (팀전 대기 중)
+  socket.on('room:setTeam', ({ team }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.status !== 'waiting') return;
+    if (room.gameMode !== 'team2' && room.gameMode !== 'team3') return;
+    const t = team === 1 ? 1 : 0;
+    room.playerTeams[socket.id] = t;
+    io.to(p.roomId).emit('room:update', sanitizeRoom(room));
+  });
+
+  // 방장: AI 추가
+  socket.on('room:addBot', ({ team, stage }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.host !== socket.id || room.status !== 'waiting') return;
+    if (roomOccupancy(room) >= room.maxPlayers) return socket.emit('error', '방이 꽉 찼습니다.');
+    const t = team === 1 ? 1 : 0;
+    const st = Math.min(7, Math.max(1, parseInt(stage, 10) || 3));
+    const botId = `bot_${room.id}_${botIdCounter++}`;
+    const n = (room.bots?.length || 0) + 1;
+    const bot = { id: botId, nickname: `AI-${n}`, team: t, stage: st };
+    room.bots.push(bot);
+    room.playerTeams[botId] = t;
+    io.to(p.roomId).emit('room:update', sanitizeRoom(room));
+    io.emit('lobby:rooms', getRoomList());
+  });
+
+  // 방장: AI 제거
+  socket.on('room:removeBot', ({ botId }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.host !== socket.id || room.status !== 'waiting') return;
+    if (!isBotId(botId)) return;
+    room.bots = (room.bots || []).filter((b) => b.id !== botId);
+    delete room.playerTeams[botId];
+    io.to(p.roomId).emit('room:update', sanitizeRoom(room));
+    io.emit('lobby:rooms', getRoomList());
+  });
+
+  // 방장: 봇 팀 변경
+  socket.on('room:setBotTeam', ({ botId, team }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.host !== socket.id || room.status !== 'waiting') return;
+    const b = room.bots?.find((x) => x.id === botId);
+    if (!b) return;
+    b.team = team === 1 ? 1 : 0;
+    room.playerTeams[botId] = b.team;
+    io.to(p.roomId).emit('room:update', sanitizeRoom(room));
+  });
+
   // 방 참가
-  socket.on('room:join', (roomId) => {
+  socket.on('room:join', (payload) => {
+    const roomId = typeof payload === 'string' ? payload : payload?.roomId;
+    const password = typeof payload === 'string' ? '' : String(payload?.password || '');
     const room = rooms[roomId];
     if (!room) return socket.emit('error', '방이 없습니다.');
     if (room.status !== 'waiting') return socket.emit('error', '이미 게임 중입니다.');
-    if (room.players.length >= room.maxPlayers) return socket.emit('error', '방이 꽉 찼습니다.');
+    if (roomOccupancy(room) >= room.maxPlayers) return socket.emit('error', '방이 꽉 찼습니다.');
     if (players[socket.id].roomId) return;
+    if (room.password && room.password !== password.trim()) {
+      return socket.emit('error', '비밀번호가 올바르지 않습니다.');
+    }
 
+    const c0 = countTeam(room, 0);
+    const c1 = countTeam(room, 1);
     room.players.push(socket.id);
+    if (room.gameMode === 'team2' || room.gameMode === 'team3') {
+      room.playerTeams[socket.id] = c0 <= c1 ? 0 : 1;
+    }
     players[socket.id].roomId = roomId;
     socket.join(roomId);
     socket.emit('room:joined', sanitizeRoom(room));
@@ -266,23 +508,28 @@ io.on('connection', (socket) => {
 
     io.to(p.roomId).emit('room:update', sanitizeRoom(room));
 
-    recomputeTeams(room);
-    const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
-    const needFull = isTeam ? room.players.length === room.maxPlayers : room.players.length >= 2;
-    const allReady = needFull &&
-      room.players.every(id => room.readySet.has(id));
-
-    if (allReady) {
+    if (canStartGame(room)) {
       room.status = 'playing';
       room.gameStates = {};
+      const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
+      const teamsMap = buildTeamMap(room);
+      const playersPayload = [
+        ...room.players.map((id) => ({
+          id,
+          nickname: players[id]?.nickname || '?',
+          isBot: false,
+        })),
+        ...(room.bots || []).map((b) => ({
+          id: b.id,
+          nickname: b.nickname,
+          isBot: true,
+        })),
+      ];
       io.to(p.roomId).emit('game:start', {
         showGhost: !!room.showGhost,
         gameMode: room.gameMode || 'ffa',
-        teams: isTeam ? { ...room.playerTeams } : undefined,
-        players: room.players.map(id => ({
-          id,
-          nickname: players[id]?.nickname || '?',
-        }))
+        teams: isTeam ? teamsMap : undefined,
+        players: playersPayload,
       });
       io.emit('lobby:rooms', getRoomList());
     }
@@ -307,88 +554,59 @@ io.on('connection', (socket) => {
     const n = Math.max(1, Math.min(12, parseInt(lines, 10) || 1));
     const targetId = pickGarbageTarget(room, socket.id);
     if (!targetId) return;
-    const fromNick = players[socket.id]?.nickname || '?';
-    const toNick = players[targetId]?.nickname || '?';
-    io.to(targetId).emit('game:garbage', { from: socket.id, lines: n });
-    io.to(p.roomId).emit('game:attackFx', {
-      from: socket.id,
-      to: targetId,
-      lines: n,
-      fromNick,
-      toNick,
-    });
+    emitGarbageToTarget(io, room, p.roomId, socket.id, targetId, n);
   });
 
-  // 게임 오버 (본인)
+  // 방장이 돌리는 AI 봇 — 상태 중계
+  socket.on('game:botState', ({ botId, state }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.host !== socket.id || room.status !== 'playing') return;
+    if (!room.bots?.some((b) => b.id === botId)) return;
+    room.gameStates[botId] = state;
+    socket.to(p.roomId).emit('game:opponent', { id: botId, state });
+  });
+
+  socket.on('game:botAttack', ({ botId, lines }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.host !== socket.id || room.status !== 'playing') return;
+    if (!room.bots?.some((b) => b.id === botId)) return;
+    const n = Math.max(1, Math.min(12, parseInt(lines, 10) || 1));
+    const targetId = pickGarbageTarget(room, botId);
+    if (!targetId) return;
+    emitGarbageToTarget(io, room, p.roomId, botId, targetId, n);
+  });
+
+  socket.on('game:botOver', ({ botId, score, lines }) => {
+    const p = players[socket.id];
+    if (!p?.roomId) return;
+    const room = rooms[p.roomId];
+    if (!room || room.host !== socket.id || room.status !== 'playing') return;
+    if (!room.bots?.some((b) => b.id === botId)) return;
+    room.gameStates[botId] = Object.assign({}, room.gameStates[botId], { over: true });
+    maybeTeamOrFfaWin(room, p.roomId);
+  });
+
+  // 게임 오버 (온라인) — 랭킹에는 반영하지 않음 (솔로 전용 랭킹)
   socket.on('game:myover', ({ score, lines }) => {
     const p = players[socket.id];
     if (!p.roomId) return;
     const room = rooms[p.roomId];
     if (!room || room.status !== 'playing') return;
 
-    const nick = p.nickname || '?';
-    addRanking(nick, score, lines);
-    io.emit('ranking:update', ranking.slice(0, 20));
-
     room.gameStates[socket.id] = Object.assign({}, room.gameStates[socket.id], { over: true });
 
-    recomputeTeams(room);
-    const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
+    maybeTeamOrFfaWin(room, p.roomId);
+  });
 
-    if (isTeam) {
-      const alive0 = room.players.filter(
-        (id) => room.playerTeams[id] === 0 && !room.gameStates[id]?.over
-      );
-      const alive1 = room.players.filter(
-        (id) => room.playerTeams[id] === 1 && !room.gameStates[id]?.over
-      );
-      if (alive0.length === 0 && alive1.length > 0) {
-        const rep = alive1[0];
-        io.to(p.roomId).emit('game:over', {
-          winnerId: rep,
-          winnerNick: '🅱 팀 B 승리!',
-          winnerTeam: 1,
-          isTeamGame: true,
-          reason: '게임 종료',
-        });
-        room.status = 'waiting';
-        room.readySet.clear();
-        room.gameStates = {};
-        io.emit('lobby:rooms', getRoomList());
-        io.to(p.roomId).emit('room:update', sanitizeRoom(room));
-        return;
-      }
-      if (alive1.length === 0 && alive0.length > 0) {
-        const rep = alive0[0];
-        io.to(p.roomId).emit('game:over', {
-          winnerId: rep,
-          winnerNick: '🅰 팀 A 승리!',
-          winnerTeam: 0,
-          isTeamGame: true,
-          reason: '게임 종료',
-        });
-        room.status = 'waiting';
-        room.readySet.clear();
-        room.gameStates = {};
-        io.emit('lobby:rooms', getRoomList());
-        io.to(p.roomId).emit('room:update', sanitizeRoom(room));
-        return;
-      }
-      return;
-    }
-
-    // FFA: 살아남은 한명이면 게임 종료
-    const aliveAll = room.players.filter(id => !room.gameStates[id]?.over);
-    if (aliveAll.length <= 1) {
-      const winnerId = aliveAll[0] || null;
-      const winnerNick = winnerId ? players[winnerId]?.nickname : '없음';
-      io.to(p.roomId).emit('game:over', { winnerId, winnerNick, reason: '게임 종료' });
-      room.status = 'waiting';
-      room.readySet.clear();
-      room.gameStates = {};
-      io.emit('lobby:rooms', getRoomList());
-      io.to(p.roomId).emit('room:update', sanitizeRoom(room));
-    }
+  // 솔로 모드 최고 점수 랭킹
+  socket.on('solo:submit', ({ score, lines }) => {
+    const nick = players[socket.id]?.nickname || '?';
+    submitSoloScore(nick, score, lines);
+    io.emit('ranking:update', getSoloRankingSlice(20));
   });
 
   // 채팅
@@ -406,7 +624,7 @@ io.on('connection', (socket) => {
 
   // 랭킹 요청
   socket.on('ranking:get', () => {
-    socket.emit('ranking:update', ranking.slice(0, 20));
+    socket.emit('ranking:update', getSoloRankingSlice(20));
   });
 
   // 연결 해제

@@ -200,15 +200,150 @@ class TetrisGame {
     this._lock();
   }
 
-  addGarbage(lines) {
-    const gapCol = Math.floor(Math.random() * COLS);
-    for (let i = 0; i < lines; i++) {
+  addGarbage(arg) {
+    const p = typeof arg === 'number' ? { kind: 'rows', lines: arg } : (arg || { kind: 'rows', lines: 1 });
+    return this.applyPenalty(p);
+  }
+
+  /** 다양한 훼방(가비지) — 서버에서 kind 지정 */
+  applyPenalty(penalty) {
+    if (!this.running || this.gameOver) return;
+    const kind = penalty.kind || 'rows';
+    switch (kind) {
+      case 'rows':
+        this._penaltyRows(penalty.lines || 1, 1);
+        break;
+      case 'split':
+        this._penaltyRows(penalty.lines || 1, 2);
+        break;
+      case 'cheese':
+        this._penaltyCheese(penalty.lines || 2);
+        break;
+      case 'meteor':
+        this._penaltyMeteors(penalty.meteors || 1);
+        break;
+      case 'columns':
+        this._penaltyColumns(penalty.cols || 2, penalty.depth || 3);
+        break;
+      case 'shower':
+        this._penaltyShower(penalty.blocks || 8);
+        break;
+      default:
+        this._penaltyRows(penalty.lines || penalty.power || 1, 1);
+    }
+    this._resolveCurrentAfterGarbage();
+  }
+
+  _garbageRectOccupied(px, py, w, h) {
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const nr = py + r;
+        const nc = px + c;
+        if (nr < 0) continue;
+        if (nr >= ROWS || nc < 0 || nc >= COLS) return true;
+        if (this.board[nr][nc]) return true;
+      }
+    }
+    return false;
+  }
+
+  _placeGarbageRect(px, py, w, h) {
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const nr = py + r;
+        const nc = px + c;
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) this.board[nr][nc] = 'G';
+      }
+    }
+  }
+
+  _penaltyRows(lines, holes) {
+    const n = Math.max(1, Math.min(12, parseInt(lines, 10) || 1));
+    const h = Math.min(3, Math.max(1, parseInt(holes, 10) || 1));
+    for (let i = 0; i < n; i++) {
       this.board.shift();
       const row = Array(COLS).fill('G');
-      row[gapCol] = 0;
+      const used = new Set();
+      for (let k = 0; k < h; k++) {
+        let col = Math.floor(Math.random() * COLS);
+        let guard = 0;
+        while (used.has(col) && guard++ < 20) col = Math.floor(Math.random() * COLS);
+        used.add(col);
+        row[col] = 0;
+      }
       this.board.push(row);
     }
-    // 현재 피스가 겹치면 올려줌
+  }
+
+  _penaltyCheese(lines) {
+    const n = Math.max(2, Math.min(10, parseInt(lines, 10) || 3));
+    for (let i = 0; i < n; i++) {
+      this.board.shift();
+      const row = Array(COLS).fill(0);
+      const blocks = 7 + Math.floor(Math.random() * 2);
+      const set = new Set();
+      while (set.size < blocks) set.add(Math.floor(Math.random() * COLS));
+      for (let c = 0; c < COLS; c++) {
+        if (set.has(c)) row[c] = 'G';
+      }
+      this.board.push(row);
+    }
+  }
+
+  _penaltyMeteors(meteors) {
+    const m = Math.max(1, Math.min(8, parseInt(meteors, 10) || 1));
+    for (let i = 0; i < m; i++) {
+      const big = Math.random() < 0.62;
+      if (big) {
+        const px = Math.floor(Math.random() * (COLS - 1));
+        let py = -2;
+        while (!this._garbageRectOccupied(px, py + 1, 2, 2)) py++;
+        this._placeGarbageRect(px, py, 2, 2);
+      } else {
+        const px = Math.floor(Math.random() * COLS);
+        let py = -1;
+        while (!this._garbageRectOccupied(px, py + 1, 1, 1)) py++;
+        this._placeGarbageRect(px, py, 1, 1);
+      }
+    }
+  }
+
+  _penaltyColumns(colCount, depth) {
+    const nc = Math.max(1, Math.min(COLS, parseInt(colCount, 10) || 2));
+    const d = Math.max(1, Math.min(ROWS, parseInt(depth, 10) || 3));
+    const cols = [];
+    while (cols.length < nc) {
+      const c = Math.floor(Math.random() * COLS);
+      if (!cols.includes(c)) cols.push(c);
+    }
+    for (const col of cols) {
+      let placed = 0;
+      for (let r = ROWS - 1; r >= 0 && placed < d; r--) {
+        if (this.board[r][col] === 0) {
+          this.board[r][col] = 'G';
+          placed++;
+        }
+      }
+    }
+  }
+
+  _penaltyShower(blocks) {
+    const b = Math.max(3, Math.min(24, parseInt(blocks, 10) || 8));
+    for (let k = 0; k < b; k++) {
+      let placed = false;
+      for (let t = 0; t < 40 && !placed; t++) {
+        const c = Math.floor(Math.random() * COLS);
+        const r = Math.floor(Math.random() * 10);
+        if (this.board[r][c] === 0) {
+          this.board[r][c] = 'G';
+          placed = true;
+        }
+      }
+    }
+  }
+
+  _resolveCurrentAfterGarbage() {
+    if (!this.current || !this.running) return;
     while (this._collides(this.current.shape, this.current.x, this.current.y)) {
       this.current.y--;
       if (this.current.y < 0) {

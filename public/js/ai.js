@@ -300,26 +300,6 @@ class AIBot {
     return rotated;
   }
 
-  addGarbage(lines) {
-    const gapCol = Math.floor(Math.random() * COLS);
-    for (let i = 0; i < lines; i++) {
-      this.board.shift();
-      const row = Array(COLS).fill('G');
-      row[gapCol] = 0;
-      this.board.push(row);
-    }
-    if (this.current) {
-      while (this._collides(this.current.shape, this.current.x, this.current.y)) {
-        this.current.y--;
-        if (this.current.y < 0) {
-          this.running = false; this.gameOver = true;
-          this.onGameOver(this.score, this.lines);
-          return;
-        }
-      }
-    }
-  }
-
   _loop(ts) {
     if (!this.running) return;
     this._draw();
@@ -374,6 +354,28 @@ class AIBot {
   }
 
   _getState() {
-    return { board: this.board, score: this.score, lines: this.lines, level: this.level, over: this.gameOver };
+    let current = null;
+    if (this.current && !this.gameOver) {
+      current = {
+        type: this.current.type,
+        shape: this.current.shape.map((row) => row.map((c) => c)),
+        x: this.current.x,
+        y: this.current.y,
+      };
+    }
+    return {
+      board: this.board,
+      current,
+      score: this.score,
+      lines: this.lines,
+      level: this.level,
+      over: this.gameOver,
+    };
   }
 }
+
+(function copyPenaltyMethodsToAIBot() {
+  if (typeof TetrisGame === 'undefined') return;
+  const names = ['applyPenalty', 'addGarbage', '_garbageRectOccupied', '_placeGarbageRect', '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_penaltyColumns', '_penaltyShower', '_resolveCurrentAfterGarbage'];
+  names.forEach((n) => { AIBot.prototype[n] = TetrisGame.prototype[n]; });
+})();
