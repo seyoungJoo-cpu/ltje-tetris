@@ -47,7 +47,12 @@ function spawnHostAiBots(playersList) {
       null,
       stage,
       (lines) => { socket.emit('game:botAttack', { botId: p.id, lines }); },
-      (score, lines) => { socket.emit('game:botOver', { botId: p.id, score, lines }); },
+      (score, lines) => {
+        socket.emit('game:botOver', { botId: p.id, score, lines });
+        if (typeof bot._getState === 'function') {
+          socket.emit('game:botState', { botId: p.id, state: bot._getState() });
+        }
+      },
       (state) => {
         const now = performance.now();
         if ((now - (lastEmit[p.id] || 0)) < 22) return;
@@ -488,6 +493,9 @@ function startGame(players, showGhost) {
     },
     (score, lines) => {
       socket.emit('game:myover', { score, lines });
+      if (tetris && typeof tetris._getState === 'function') {
+        socket.emit('game:state', tetris._getState());
+      }
     },
     { showGhost: ghostOpt, onLock: (cleared) => { socket.emit('game:lock', { cleared }); },
       onLineClear: (p) => {

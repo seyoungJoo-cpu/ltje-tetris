@@ -177,17 +177,7 @@ class AIBot {
     this.current = this.next;
     this.next = this._spawnPiece(this._getFromBag());
     if (this._collides(this.current.shape, this.current.x, this.current.y)) {
-      if (this.thinkTimer) {
-        clearTimeout(this.thinkTimer);
-        this.thinkTimer = null;
-      }
-      if (this.animFrame) {
-        cancelAnimationFrame(this.animFrame);
-        this.animFrame = null;
-      }
-      this.running = false;
-      this.gameOver = true;
-      this.onGameOver(this.score, this.lines);
+      this._endGame();
       return;
     }
     this._drawNext();
@@ -275,17 +265,7 @@ class AIBot {
       for (let c = 0; c < shape[r].length; c++) {
         if (!shape[r][c]) continue;
         if (y + r < 0) {
-          if (this.thinkTimer) {
-            clearTimeout(this.thinkTimer);
-            this.thinkTimer = null;
-          }
-          if (this.animFrame) {
-            cancelAnimationFrame(this.animFrame);
-            this.animFrame = null;
-          }
-          this.running = false;
-          this.gameOver = true;
-          this.onGameOver(this.score, this.lines);
+          this._endGame();
           return;
         }
       }
@@ -320,6 +300,7 @@ class AIBot {
       this.comboCount = 0;
     }
     this._spawn();
+    if (this.gameOver) return;
     if (typeof this.onLock === 'function') this.onLock(cleared);
   }
 
@@ -368,7 +349,7 @@ class AIBot {
   }
 
   _loop(ts) {
-    if (!this.running) return;
+    if (!this.running || this.gameOver) return;
     const delta = Math.min(90, ts - this.lastTime);
     this.lastTime = ts;
 
@@ -477,17 +458,24 @@ class AIBot {
   names.forEach((n) => { AIBot.prototype[n] = TetrisGame.prototype[n]; });
 })();
 
+function _stopAIBotLoops(bot) {
+  if (bot.thinkTimer) {
+    clearTimeout(bot.thinkTimer);
+    bot.thinkTimer = null;
+  }
+  if (bot.animFrame) {
+    cancelAnimationFrame(bot.animFrame);
+    bot.animFrame = null;
+  }
+}
+
+AIBot.prototype._endGame = function aiEndGame() {
+  TetrisGame.prototype._endGame.call(this);
+  _stopAIBotLoops(this);
+};
+
 /** 훼방으로 눌려 게임오버될 때도 think 타이머·rAF를 끊어 onGameOver 이후 유령 루프 방지 */
 AIBot.prototype._resolveCurrentAfterGarbage = function aiResolveAfterGarbage() {
   TetrisGame.prototype._resolveCurrentAfterGarbage.call(this);
-  if (this.gameOver) {
-    if (this.thinkTimer) {
-      clearTimeout(this.thinkTimer);
-      this.thinkTimer = null;
-    }
-    if (this.animFrame) {
-      cancelAnimationFrame(this.animFrame);
-      this.animFrame = null;
-    }
-  }
+  if (this.gameOver) _stopAIBotLoops(this);
 };

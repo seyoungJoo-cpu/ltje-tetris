@@ -671,6 +671,10 @@ io.on('connection', (socket) => {
     const room = rooms[p.roomId];
     if (!room || room.status !== 'playing') return;
     room.gameStates[socket.id] = state;
+    if (state && state.over) {
+      room.gameStates[socket.id] = Object.assign({}, state, { over: true });
+      maybeTeamOrFfaWin(room, p.roomId);
+    }
     socket.to(p.roomId).emit('game:opponent', { id: socket.id, state });
   });
 

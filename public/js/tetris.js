@@ -111,19 +111,48 @@ class TetrisGame {
     if (this.running) this._draw();
   }
 
+  /** 가비지 shift 시 맨 윗줄이 밀려 나가면 탑아웃 */
+  _wouldOverflowOnPush() {
+    return this.board[0].some((c) => c !== 0);
+  }
+
+  _checkGameOver() {
+    if (this.gameOver || !this.running) return;
+    if (this._wouldOverflowOnPush()) {
+      this._endGame();
+      return;
+    }
+    if (this.current && this._collides(this.current.shape, this.current.x, this.current.y)) {
+      this._endGame();
+    }
+  }
+
+  _endGame() {
+    if (this.gameOver) return;
+    this.running = false;
+    this.gameOver = true;
+    this.current = null;
+    this._draw();
+    if (typeof this.onStateChange === 'function') {
+      this.onStateChange(this._getState());
+    }
+    if (typeof this.onGameOver === 'function') {
+      this.onGameOver(this.score, this.lines);
+    }
+  }
+
   _spawn() {
     this.current = this.next;
     this.next = this._spawnPiece(this._getFromBag());
     if (this._collides(this.current.shape, this.current.x, this.current.y)) {
-      this.running = false;
-      this.gameOver = true;
-      this.onGameOver(this.score, this.lines);
+      this._endGame();
+      return;
     }
     this._drawNext();
   }
 
   _loop(ts) {
-    if (!this.running) return;
+    if (!this.running || this.gameOver) return;
     const delta = ts - this.lastTime;
     this.lastTime = ts;
     if (!this.paused) {
@@ -140,6 +169,7 @@ class TetrisGame {
   }
 
   _drop() {
+    if (!this.current || this.gameOver) return;
     if (this._collides(this.current.shape, this.current.x, this.current.y + 1)) {
       this._lock();
     } else {
@@ -153,9 +183,7 @@ class TetrisGame {
       for (let c = 0; c < shape[r].length; c++) {
         if (!shape[r][c]) continue;
         if (y + r < 0) {
-          this.running = false;
-          this.gameOver = true;
-          this.onGameOver(this.score, this.lines);
+          this._endGame();
           return;
         }
       }
@@ -190,6 +218,7 @@ class TetrisGame {
       this.comboCount = 0;
     }
     this._spawn();
+    if (this.gameOver) return;
     if (typeof this.onLock === 'function') this.onLock(cleared);
   }
 
@@ -231,6 +260,7 @@ class TetrisGame {
   }
 
   _tryRotate() {
+    if (!this.current || this.gameOver) return;
     const rotated = this._rotate(this.current.shape);
     const kicks = [0, 1, -1, 2, -2];
     for (const kick of kicks) {
@@ -243,6 +273,7 @@ class TetrisGame {
   }
 
   hardDrop() {
+    if (!this.current || this.gameOver) return;
     while (!this._collides(this.current.shape, this.current.x, this.current.y + 1)) {
       this.current.y++;
       this.score += 2;
@@ -279,6 +310,7 @@ class TetrisGame {
         this._penaltyRows(penalty.lines || penalty.power || 1, 1);
     }
     this._resolveCurrentAfterGarbage();
+    this._checkGameOver();
   }
 
   _garbageRectOccupied(px, py, w, h) {
@@ -308,6 +340,10 @@ class TetrisGame {
     const n = Math.max(1, Math.min(12, parseInt(lines, 10) || 1));
     const h = Math.min(3, Math.max(1, parseInt(holes, 10) || 1));
     for (let i = 0; i < n; i++) {
+      if (this._wouldOverflowOnPush()) {
+        this._endGame();
+        return;
+      }
       this.board.shift();
       const row = Array(COLS).fill('G');
       const used = new Set();
@@ -325,6 +361,10 @@ class TetrisGame {
   _penaltyCheese(lines) {
     const n = Math.max(2, Math.min(10, parseInt(lines, 10) || 3));
     for (let i = 0; i < n; i++) {
+      if (this._wouldOverflowOnPush()) {
+        this._endGame();
+        return;
+      }
       this.board.shift();
       const row = Array(COLS).fill(0);
       const blocks = 7 + Math.floor(Math.random() * 2);
@@ -356,19 +396,18 @@ class TetrisGame {
   }
 
   _resolveCurrentAfterGarbage() {
-    if (!this.current || !this.running) return;
+    if (!this.current || !this.running || this.gameOver) return;
     while (this._collides(this.current.shape, this.current.x, this.current.y)) {
       this.current.y--;
       if (this.current.y < 0) {
-        this.running = false;
-        this.gameOver = true;
-        this.onGameOver(this.score, this.lines);
+        this._endGame();
         return;
       }
     }
   }
 
   _getGhostY() {
+    if (!this.current) return 0;
     let gy = this.current.y;
     while (!this._collides(this.current.shape, this.current.x, gy + 1)) gy++;
     return gy;
@@ -481,7 +520,7 @@ class TetrisGame {
 
   _bindKeys() {
     document.addEventListener('keydown', (e) => {
-      if (!this.running) return;
+      if (!this.running || this.gameOver) return;
       const tag = (e.target && e.target.tagName) || '';
       if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable)) return;
       if (this.allowPause && (e.key === 'p' || e.key === 'P')) {
@@ -491,7 +530,7 @@ class TetrisGame {
         }
         return;
       }
-      if (this.paused) return;
+      if (this.paused || !this.current) return;
       switch (e.key) {
         case 'ArrowLeft':
           if (!this._collides(this.current.shape, this.current.x - 1, this.current.y))
