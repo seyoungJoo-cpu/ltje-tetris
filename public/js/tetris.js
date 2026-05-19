@@ -27,6 +27,7 @@ const PIECES = {
 };
 
 const PIECE_KEYS = Object.keys(PIECES);
+const SPAWN_ENTRY_KICKS = [0, -1, 1, -2, 2];
 
 const SCORE_TABLE = { 1: 100, 2: 300, 3: 500, 4: 800 };
 const LEVEL_SPEED = [800, 700, 600, 500, 400, 300, 250, 200, 150, 100];
@@ -111,20 +112,64 @@ class TetrisGame {
     if (this.running) this._draw();
   }
 
-  /** 가비지 shift 시 맨 윗줄이 밀려 나가면 탑아웃 */
-  _wouldOverflowOnPush() {
-    return this.board[0].some((c) => c !== 0);
+  _pieceFitsAt(shape, px, py) {
+    return !this._collides(shape, px, py);
   }
 
-  _checkGameOver() {
+  /** 스폰 위치(y=0) + 벽 킥으로 type 조각을 둘 수 있는지 */
+  _canSpawnTypeAtEntry(type) {
+    const base = this._spawnPiece(type);
+    const w = base.shape[0].length;
+    for (let ki = 0; ki < SPAWN_ENTRY_KICKS.length; ki++) {
+      const px = base.x + SPAWN_ENTRY_KICKS[ki];
+      if (px < 0 || px + w > COLS) continue;
+      if (this._pieceFitsAt(base.shape, px, base.y)) return true;
+    }
+    return false;
+  }
+
+  _hasCellsAboveCeiling() {
+    if (!this.current) return false;
+    const { shape, x, y } = this.current;
+    for (let r = 0; r < shape.length; r++) {
+      for (let c = 0; c < shape[r].length; c++) {
+        if (shape[r][c] && y + r < 0) return true;
+      }
+    }
+    return false;
+  }
+
+  /** 현재 조각이 보드에 끼여 어느 방향으로도 못 움직이면 사망 */
+  _isCurrentPieceTrapped() {
+    if (!this.current) return false;
+    const { shape, x, y } = this.current;
+    if (!this._collides(shape, x, y)) return false;
+    const deltas = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+    for (let i = 0; i < deltas.length; i++) {
+      const dx = deltas[i][0];
+      const dy = deltas[i][1];
+      if (!this._collides(shape, x + dx, y + dy)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * 새 블록을 더 이상 낼 수 없을 때 사망:
+   * - next 미리보기 조각 스폰 불가
+   * - 7종 모두 스폰 불가(보드 꽉 참)
+   * - 현재 조각이 천장 위/완전 끼임
+   */
+  _cannotSpawnNewBlock() {
+    if (this.next && !this._canSpawnTypeAtEntry(this.next.type)) return true;
+    if (!PIECE_KEYS.some((t) => this._canSpawnTypeAtEntry(t))) return true;
+    if (this._hasCellsAboveCeiling()) return true;
+    if (this._isCurrentPieceTrapped()) return true;
+    return false;
+  }
+
+  _checkNewBlockBlocked() {
     if (this.gameOver || !this.running) return;
-    if (this._wouldOverflowOnPush()) {
-      this._endGame();
-      return;
-    }
-    if (this.current && this._collides(this.current.shape, this.current.x, this.current.y)) {
-      this._endGame();
-    }
+    if (this._cannotSpawnNewBlock()) this._endGame();
   }
 
   _endGame() {
@@ -142,13 +187,15 @@ class TetrisGame {
   }
 
   _spawn() {
-    this.current = this.next;
+    const incoming = this.next;
+    this.current = incoming;
     this.next = this._spawnPiece(this._getFromBag());
-    if (this._collides(this.current.shape, this.current.x, this.current.y)) {
+    if (!incoming || this._collides(incoming.shape, incoming.x, incoming.y)) {
       this._endGame();
       return;
     }
     this._drawNext();
+    this._checkNewBlockBlocked();
   }
 
   _loop(ts) {
@@ -162,6 +209,7 @@ class TetrisGame {
         this._drop();
         this.dropAccum = 0;
       }
+      this._checkNewBlockBlocked();
     }
     this._draw();
     if (!this.paused) this.onStateChange(this._getState());
@@ -241,9 +289,10 @@ class TetrisGame {
     for (let r = 0; r < shape.length; r++) {
       for (let c = 0; c < shape[r].length; c++) {
         if (!shape[r][c]) continue;
-        const nr = py + r, nc = px + c;
-        if (nr >= ROWS || nc < 0 || nc >= COLS) return true;
-        if (nr >= 0 && this.board[nr][nc]) return true;
+        const nr = py + r;
+        const nc = px + c;
+        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) return true;
+        if (this.board[nr][nc]) return true;
       }
     }
     return false;
@@ -310,7 +359,7 @@ class TetrisGame {
         this._penaltyRows(penalty.lines || penalty.power || 1, 1);
     }
     this._resolveCurrentAfterGarbage();
-    this._checkGameOver();
+    this._checkNewBlockBlocked();
   }
 
   _garbageRectOccupied(px, py, w, h) {
@@ -340,10 +389,6 @@ class TetrisGame {
     const n = Math.max(1, Math.min(12, parseInt(lines, 10) || 1));
     const h = Math.min(3, Math.max(1, parseInt(holes, 10) || 1));
     for (let i = 0; i < n; i++) {
-      if (this._wouldOverflowOnPush()) {
-        this._endGame();
-        return;
-      }
       this.board.shift();
       const row = Array(COLS).fill('G');
       const used = new Set();
@@ -361,10 +406,6 @@ class TetrisGame {
   _penaltyCheese(lines) {
     const n = Math.max(2, Math.min(10, parseInt(lines, 10) || 3));
     for (let i = 0; i < n; i++) {
-      if (this._wouldOverflowOnPush()) {
-        this._endGame();
-        return;
-      }
       this.board.shift();
       const row = Array(COLS).fill(0);
       const blocks = 7 + Math.floor(Math.random() * 2);
@@ -404,6 +445,7 @@ class TetrisGame {
         return;
       }
     }
+    this._checkNewBlockBlocked();
   }
 
   _getGhostY() {
@@ -464,6 +506,18 @@ class TetrisGame {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText('일시정지', (COLS * BLOCK) / 2, (ROWS * BLOCK) / 2);
+      ctx.textAlign = 'start';
+      ctx.textBaseline = 'alphabetic';
+    }
+
+    if (this.gameOver) {
+      ctx.fillStyle = 'rgba(0,0,0,0.62)';
+      ctx.fillRect(0, 0, COLS * BLOCK, ROWS * BLOCK);
+      ctx.fillStyle = '#ff4081';
+      ctx.font = `bold ${Math.floor(BLOCK * 1.15)}px Jua, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('OVER', (COLS * BLOCK) / 2, (ROWS * BLOCK) / 2);
       ctx.textAlign = 'start';
       ctx.textBaseline = 'alphabetic';
     }

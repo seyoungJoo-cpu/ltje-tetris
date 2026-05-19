@@ -174,13 +174,16 @@ class AIBot {
   }
 
   _spawn() {
-    this.current = this.next;
+    const incoming = this.next;
+    this.current = incoming;
     this.next = this._spawnPiece(this._getFromBag());
-    if (this._collides(this.current.shape, this.current.x, this.current.y)) {
+    if (!incoming || this._collides(incoming.shape, incoming.x, incoming.y)) {
       this._endGame();
       return;
     }
     this._drawNext();
+    this._checkNewBlockBlocked();
+    if (this.gameOver) return;
     this.movePhase = 'think';
     this.dropAccum = 0;
     this.moveStepAccum = 0;
@@ -190,7 +193,7 @@ class AIBot {
 
   // ── AI 사고 ──
   _think() {
-    if (!this.running) return;
+    if (!this.running || this.gameOver) return;
 
     // 실수 확률
     if (Math.random() < this.profile.mistakeRate) {
@@ -331,9 +334,10 @@ class AIBot {
     for (let r = 0; r < shape.length; r++) {
       for (let c = 0; c < shape[r].length; c++) {
         if (!shape[r][c]) continue;
-        const nr = py + r, nc = px + c;
-        if (nr >= ROWS || nc < 0 || nc >= COLS) return true;
-        if (nr >= 0 && this.board[nr][nc]) return true;
+        const nr = py + r;
+        const nc = px + c;
+        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) return true;
+        if (this.board[nr][nc]) return true;
       }
     }
     return false;
@@ -380,6 +384,7 @@ class AIBot {
       }
     }
 
+    this._checkNewBlockBlocked();
     this._draw();
     if (this.onStateChange) this.onStateChange(this._getState());
     this.animFrame = requestAnimationFrame(this._loop.bind(this));
@@ -406,10 +411,11 @@ class AIBot {
     if (this.gameOver) {
       ctx.fillStyle = 'rgba(0,0,0,0.65)';
       ctx.fillRect(0, 0, COLS * B, ROWS * B);
-      ctx.fillStyle = '#00e676';
-      ctx.font = `bold ${B * 1.3}px Jua, sans-serif`;
+      ctx.fillStyle = '#ff4081';
+      ctx.font = `bold ${B * 1.2}px Jua, sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText('WIN', COLS * B / 2, ROWS * B / 2);
+      ctx.fillText('OVER', COLS * B / 2, ROWS * B / 2);
+      ctx.textAlign = 'start';
     }
   }
 
@@ -454,7 +460,12 @@ class AIBot {
 
 (function copyPenaltyMethodsToAIBot() {
   if (typeof TetrisGame === 'undefined') return;
-  const names = ['applyPenalty', 'addGarbage', '_garbageRectOccupied', '_placeGarbageRect', '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_resolveCurrentAfterGarbage'];
+  const names = [
+    'applyPenalty', 'addGarbage', '_garbageRectOccupied', '_placeGarbageRect',
+    '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_resolveCurrentAfterGarbage',
+    '_checkNewBlockBlocked', '_cannotSpawnNewBlock', '_canSpawnTypeAtEntry',
+    '_isCurrentPieceTrapped', '_hasCellsAboveCeiling', '_pieceFitsAt',
+  ];
   names.forEach((n) => { AIBot.prototype[n] = TetrisGame.prototype[n]; });
 })();
 
