@@ -34,6 +34,24 @@ function allSlotIds(room) {
   return [...room.players, ...(room.bots || []).map((b) => b.id)];
 }
 
+/** 탈락 처리 — gameStates 미전송이어도 생존자 카운트에 반영 */
+function markSlotEliminated(room, slotId) {
+  if (!room || !slotId) return;
+  if (!room.eliminatedSlots) room.eliminatedSlots = new Set();
+  room.eliminatedSlots.add(slotId);
+  room.gameStates[slotId] = Object.assign({}, room.gameStates[slotId] || {}, { over: true });
+}
+
+function isSlotAlive(room, slotId) {
+  if (room.eliminatedSlots && room.eliminatedSlots.has(slotId)) return false;
+  const st = room.gameStates[slotId];
+  return !(st && st.over === true);
+}
+
+function aliveSlots(room) {
+  return allSlotIds(room).filter((id) => isSlotAlive(room, id));
+}
+
 function countTeam(room, team) {
   let n = 0;
   for (const id of room.players) {
@@ -182,6 +200,8 @@ function removePlayerFromRoom(socketId) {
           room.gameStates = {};
           room.incomingGarbage = {};
         }
+      } else if (room.gameMode === 'ffa') {
+        maybeTeamOrFfaWin(room, p.roomId);
       } else if (room.players.length === 1 && !room.bots?.length) {
         const winnerId = room.players[0];
         const winnerNick = players[winnerId]?.nickname || '?';
@@ -190,6 +210,7 @@ function removePlayerFromRoom(socketId) {
         room.readySet.clear();
         room.gameStates = {};
         room.incomingGarbage = {};
+        room.eliminatedSlots = new Set();
       }
     }
     io.to(p.roomId).emit('room:update', sanitizeRoom(room));
@@ -254,12 +275,10 @@ function pickGarbageTarget(room, attackerId) {
   let pool;
   if (room.gameMode === 'team2' || room.gameMode === 'team3') {
     pool = others.filter(
-      (id) =>
-        (room.playerTeams[id] ?? 0) !== myTeam &&
-        !room.gameStates[id]?.over
+      (id) => (room.playerTeams[id] ?? 0) !== myTeam && isSlotAlive(room, id)
     );
   } else {
-    pool = others.filter((id) => !room.gameStates[id]?.over);
+    pool = others.filter((id) => isSlotAlive(room, id));
   }
   if (pool.length === 0) return null;
   return pool[Math.floor(Math.random() * pool.length)];
@@ -415,6 +434,7 @@ function endRoundAndReset(room, roomId) {
   room.readySet.clear();
   room.gameStates = {};
   room.incomingGarbage = {};
+  room.eliminatedSlots = new Set();
   io.emit('lobby:rooms', getRoomList());
   io.to(roomId).emit('room:update', sanitizeRoom(room));
 }
@@ -424,10 +444,10 @@ function maybeTeamOrFfaWin(room, roomId) {
   const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
   if (isTeam) {
     const alive0 = allSlotIds(room).filter(
-      (id) => (room.playerTeams[id] ?? 0) === 0 && !room.gameStates[id]?.over
+      (id) => (room.playerTeams[id] ?? 0) === 0 && isSlotAlive(room, id)
     );
     const alive1 = allSlotIds(room).filter(
-      (id) => (room.playerTeams[id] ?? 0) === 1 && !room.gameStates[id]?.over
+      (id) => (room.playerTeams[id] ?? 0) === 1 && isSlotAlive(room, id)
     );
     if (alive0.length === 0 && alive1.length > 0) {
       const rep = alive1[0];
@@ -455,11 +475,15 @@ function maybeTeamOrFfaWin(room, roomId) {
     }
     return false;
   }
-  const aliveAll = allSlotIds(room).filter((id) => !room.gameStates[id]?.over);
+  const aliveAll = aliveSlots(room);
   if (aliveAll.length <= 1) {
     const winnerId = aliveAll[0] || null;
     const winnerNick = winnerId ? resolveSlotNickname(room, winnerId) : '없음';
-    io.to(roomId).emit('game:over', { winnerId, winnerNick, reason: '게임 종료' });
+    io.to(roomId).emit('game:over', {
+      winnerId,
+      winnerNick,
+      reason: aliveAll.length === 1 ? '마지막 1인 생존' : '전원 탈락',
+    });
     endRoundAndReset(room, roomId);
     return true;
   }
@@ -622,6 +646,7 @@ io.on('connection', (socket) => {
     if (canStartGame(room)) {
       room.status = 'playing';
       room.gameStates = {};
+      room.eliminatedSlots = new Set();
       room.incomingGarbage = {};
       const isTeam = room.gameMode === 'team2' || room.gameMode === 'team3';
       const teamsMap = buildTeamMap(room);
@@ -672,7 +697,7 @@ io.on('connection', (socket) => {
     if (!room || room.status !== 'playing') return;
     room.gameStates[socket.id] = state;
     if (state && state.over) {
-      room.gameStates[socket.id] = Object.assign({}, state, { over: true });
+      markSlotEliminated(room, socket.id);
       maybeTeamOrFfaWin(room, p.roomId);
     }
     socket.to(p.roomId).emit('game:opponent', { id: socket.id, state });
@@ -699,7 +724,7 @@ io.on('connection', (socket) => {
     if (!room.bots?.some((b) => b.id === botId)) return;
     room.gameStates[botId] = state;
     if (state && state.over) {
-      room.gameStates[botId] = Object.assign({}, room.gameStates[botId], { over: true });
+      markSlotEliminated(room, botId);
       maybeTeamOrFfaWin(room, p.roomId);
     }
     socket.to(p.roomId).emit('game:opponent', { id: botId, state });
@@ -723,7 +748,7 @@ io.on('connection', (socket) => {
     const room = rooms[p.roomId];
     if (!room || room.host !== socket.id || room.status !== 'playing') return;
     if (!room.bots?.some((b) => b.id === botId)) return;
-    room.gameStates[botId] = Object.assign({}, room.gameStates[botId], { over: true });
+    markSlotEliminated(room, botId);
     maybeTeamOrFfaWin(room, p.roomId);
   });
 
@@ -734,7 +759,7 @@ io.on('connection', (socket) => {
     const room = rooms[p.roomId];
     if (!room || room.status !== 'playing') return;
 
-    room.gameStates[socket.id] = Object.assign({}, room.gameStates[socket.id], { over: true });
+    markSlotEliminated(room, socket.id);
 
     maybeTeamOrFfaWin(room, p.roomId);
   });

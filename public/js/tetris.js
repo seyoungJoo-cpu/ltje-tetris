@@ -112,20 +112,43 @@ class TetrisGame {
     if (this.running) this._draw();
   }
 
-  _pieceFitsAt(shape, px, py) {
-    return !this._collides(shape, px, py);
+  /** 현재 떨어지는 조각까지 합친 가상 보드 (스폰 가능 여부 판정용) */
+  _boardWithCurrent() {
+    const b = this.board.map((row) => row.slice());
+    if (!this.current) return b;
+    const { shape, x, y, type } = this.current;
+    for (let r = 0; r < shape.length; r++) {
+      for (let c = 0; c < shape[r].length; c++) {
+        if (!shape[r][c]) continue;
+        const nr = y + r;
+        const nc = x + c;
+        if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) b[nr][nc] = type;
+      }
+    }
+    return b;
   }
 
-  /** 스폰 위치(y=0) + 벽 킥으로 type 조각을 둘 수 있는지 */
+  /** 스폰 위치(y=0) + 회전·벽킥 — 현재 조각이 막고 있어도 반영 */
   _canSpawnTypeAtEntry(type) {
-    const base = this._spawnPiece(type);
-    const w = base.shape[0].length;
-    for (let ki = 0; ki < SPAWN_ENTRY_KICKS.length; ki++) {
-      const px = base.x + SPAWN_ENTRY_KICKS[ki];
-      if (px < 0 || px + w > COLS) continue;
-      if (this._pieceFitsAt(base.shape, px, base.y)) return true;
+    const virtual = this._boardWithCurrent();
+    let shape = PIECES[type].map((row) => row.map((cell) => cell));
+    for (let rot = 0; rot < 4; rot++) {
+      const w = shape[0].length;
+      const spawnX = Math.floor(COLS / 2) - Math.floor(w / 2);
+      for (let ki = 0; ki < SPAWN_ENTRY_KICKS.length; ki++) {
+        const px = spawnX + SPAWN_ENTRY_KICKS[ki];
+        if (px < 0 || px + w > COLS) continue;
+        if (!this._collides(shape, px, 0, virtual)) return true;
+      }
+      shape = this._rotate(shape);
     }
     return false;
+  }
+
+  /** 맨 윗줄이 현재 조각 포함해 전부 막혔는지 */
+  _isTopRowSealed() {
+    const virtual = this._boardWithCurrent();
+    return virtual[0].every((c) => c !== 0);
   }
 
   _hasCellsAboveCeiling() {
@@ -155,13 +178,13 @@ class TetrisGame {
 
   /**
    * 새 블록을 더 이상 낼 수 없을 때 사망:
-   * - next 미리보기 조각 스폰 불가
-   * - 7종 모두 스폰 불가(보드 꽉 참)
-   * - 현재 조각이 천장 위/완전 끼임
+   * - 7종·4회전 모두 스폰 불가 (현재 조각이 막는 경우 포함)
+   * - 맨 윗줄 완전 봉쇄
+   * - 천장 위로 나감 / 조각 완전 끼임
    */
   _cannotSpawnNewBlock() {
-    if (this.next && !this._canSpawnTypeAtEntry(this.next.type)) return true;
     if (!PIECE_KEYS.some((t) => this._canSpawnTypeAtEntry(t))) return true;
+    if (this._isTopRowSealed()) return true;
     if (this._hasCellsAboveCeiling()) return true;
     if (this._isCurrentPieceTrapped()) return true;
     return false;
@@ -285,14 +308,15 @@ class TetrisGame {
     return { count: fullRows.length, rows: fullRows };
   }
 
-  _collides(shape, px, py) {
+  _collides(shape, px, py, boardOpt) {
+    const board = boardOpt || this.board;
     for (let r = 0; r < shape.length; r++) {
       for (let c = 0; c < shape[r].length; c++) {
         if (!shape[r][c]) continue;
         const nr = py + r;
         const nc = px + c;
         if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) return true;
-        if (this.board[nr][nc]) return true;
+        if (board[nr][nc]) return true;
       }
     }
     return false;

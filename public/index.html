@@ -885,7 +885,7 @@ canvas { touch-action: none; }
       <select id="room-lineclear-fx-select" class="host-bot-select room-lineclear-select" aria-label="줄 클리어 이펙트"></select>
     </label>
     <button class="btn btn-secondary btn-sm" id="ready-btn" onclick="toggleReady()">레디</button>
-    <button class="btn btn-danger btn-sm" onclick="leaveRoom()">나가기</button>
+    <button class="btn btn-secondary btn-sm" onclick="leaveToLobby()">← 로비로</button>
   </div>
   <div class="room-body">
     <div class="room-left">
@@ -943,6 +943,7 @@ canvas { touch-action: none; }
     <div class="logo logo-sm">테트리스</div>
     <div class="spacer"></div>
     <div id="game-room-name" style="color:var(--text-dim);font-size:.85rem;"></div>
+    <button type="button" class="btn btn-secondary btn-sm" onclick="leaveToLobby()">← 로비로</button>
     <div class="option-row game-ghost-row" style="margin:0;padding:0;border:none;background:transparent;">
       <label class="toggle-label" for="game-live-ghost-check" style="padding:4px 8px;">
         <span class="toggle-icon" style="font-size:1rem;">👻</span>
@@ -997,7 +998,8 @@ canvas { touch-action: none; }
 <div id="gameover-overlay">
   <h1 id="gameover-title">GAME OVER</h1>
   <div class="result-info" id="gameover-info"></div>
-  <div style="display:flex;gap:12px;margin-top:8px;">
+  <div style="display:flex;gap:12px;margin-top:8px;flex-wrap:wrap;justify-content:center;">
+    <button class="btn btn-secondary" onclick="leaveToLobby()">로비로</button>
     <button class="btn btn-primary" onclick="backToRoom()">방으로 돌아가기</button>
   </div>
 </div>

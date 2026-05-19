@@ -50,12 +50,16 @@ function spawnHostAiBots(playersList) {
       (score, lines) => {
         socket.emit('game:botOver', { botId: p.id, score, lines });
         if (typeof bot._getState === 'function') {
-          socket.emit('game:botState', { botId: p.id, state: bot._getState() });
+          const st = bot._getState();
+          socket.emit('game:botState', { botId: p.id, state: st });
+          if (typeof drawOpponentBoard === 'function' && opponentCanvases[p.id]) {
+            drawOpponentBoard(opponentCanvases[p.id], st);
+          }
         }
       },
       (state) => {
         const now = performance.now();
-        if ((now - (lastEmit[p.id] || 0)) < 22) return;
+        if (!state.over && (now - (lastEmit[p.id] || 0)) < 22) return;
         lastEmit[p.id] = now;
         socket.emit('game:botState', { botId: p.id, state });
         if (typeof drawOpponentBoard === 'function' && opponentCanvases[p.id]) {
@@ -177,15 +181,30 @@ function confirmJoinPass() {
 window.closeJoinPassModal = closeJoinPassModal;
 window.confirmJoinPass = confirmJoinPass;
 
-// ── 방 나가기 ──
-function leaveRoom() {
+// ── 방 나가기 / 로비로 ──
+function leaveToLobby() {
   stopHostOnlineBots();
+  if (tetris) tetris.stop();
+  clearIncomingThreatUi();
+  document.getElementById('gameover-overlay')?.classList.remove('show');
   socket.emit('room:leave');
   myRoomId = null;
   myRoomData = null;
   isReady = false;
+  const btn = document.getElementById('ready-btn');
+  if (btn) {
+    btn.textContent = '레디';
+    btn.style.background = '';
+    btn.style.color = '';
+  }
   showScreen('lobby-screen');
 }
+
+function leaveRoom() {
+  leaveToLobby();
+}
+
+window.leaveToLobby = leaveToLobby;
 
 // ── 레디 토글 ──
 function toggleReady() {
@@ -483,7 +502,7 @@ function startGame(players, showGhost) {
       const ml = document.getElementById('online-m-lines'); if (ml) ml.textContent = state.lines;
       const mv = document.getElementById('online-m-level'); if (mv) mv.textContent = state.level;
       const now = performance.now();
-      if (now - lastStateEmit >= NET_MS) {
+      if (state.over || now - lastStateEmit >= NET_MS) {
         socket.emit('game:state', state);
         lastStateEmit = now;
       }
@@ -545,7 +564,11 @@ function showGameOver(payload) {
     if (isTeamGame) {
       info.textContent = winnerNick + (reason ? ` (${reason})` : '');
     } else {
-      info.textContent = `${winnerNick}님이 승리했습니다.` + (reason ? ` (${reason})` : '');
+      const tail = reason ? ` (${reason})` : '';
+      info.textContent =
+        reason === '마지막 1인 생존'
+          ? `${winnerNick}님이 마지막 1인으로 승리했습니다.${tail}`
+          : `${winnerNick}님이 승리했습니다.${tail}`;
     }
   }
   overlay.classList.add('show');

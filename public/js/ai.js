@@ -330,14 +330,15 @@ class AIBot {
     this._lock();
   }
 
-  _collides(shape, px, py) {
+  _collides(shape, px, py, boardOpt) {
+    const board = boardOpt || this.board;
     for (let r = 0; r < shape.length; r++) {
       for (let c = 0; c < shape[r].length; c++) {
         if (!shape[r][c]) continue;
         const nr = py + r;
         const nc = px + c;
         if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) return true;
-        if (this.board[nr][nc]) return true;
+        if (board[nr][nc]) return true;
       }
     }
     return false;
@@ -464,7 +465,7 @@ class AIBot {
     'applyPenalty', 'addGarbage', '_garbageRectOccupied', '_placeGarbageRect',
     '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_resolveCurrentAfterGarbage',
     '_checkNewBlockBlocked', '_cannotSpawnNewBlock', '_canSpawnTypeAtEntry',
-    '_isCurrentPieceTrapped', '_hasCellsAboveCeiling', '_pieceFitsAt',
+    '_isCurrentPieceTrapped', '_hasCellsAboveCeiling', '_isTopRowSealed', '_boardWithCurrent',
   ];
   names.forEach((n) => { AIBot.prototype[n] = TetrisGame.prototype[n]; });
 })();
