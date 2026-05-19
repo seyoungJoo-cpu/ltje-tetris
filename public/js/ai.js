@@ -149,14 +149,17 @@ class AIBot {
     this.moveStepAccum = 0;
     this.dropAccum = 0;
     this.comboCount = 0;
+    this._resetFreezeWatch();
     this.next = this._spawnPiece(this._getFromBag());
     this._spawn();
     this.lastTime = performance.now();
+    this._freezeSince = this.lastTime;
     this.animFrame = requestAnimationFrame(this._loop.bind(this));
   }
 
   stop() {
     this.running = false;
+    this._resetFreezeWatch();
     if (this.thinkTimer) {
       clearTimeout(this.thinkTimer);
       this.thinkTimer = null;
@@ -386,6 +389,7 @@ class AIBot {
     }
 
     this._checkNewBlockBlocked();
+    this._checkFrozenScreen(ts);
     this._draw();
     if (this.onStateChange) this.onStateChange(this._getState());
     this.animFrame = requestAnimationFrame(this._loop.bind(this));
@@ -466,6 +470,7 @@ class AIBot {
     '_penaltyRows', '_penaltyCheese', '_penaltyMeteors', '_resolveCurrentAfterGarbage',
     '_checkNewBlockBlocked', '_cannotSpawnNewBlock', '_canSpawnTypeAtEntry',
     '_isCurrentPieceTrapped', '_hasCellsAboveCeiling', '_isTopRowSealed', '_boardWithCurrent',
+    '_getFreezeSignature', '_checkFrozenScreen', '_resetFreezeWatch',
   ];
   names.forEach((n) => { AIBot.prototype[n] = TetrisGame.prototype[n]; });
 })();

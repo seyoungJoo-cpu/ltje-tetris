@@ -28,6 +28,8 @@ const PIECES = {
 
 const PIECE_KEYS = Object.keys(PIECES);
 const SPAWN_ENTRY_KICKS = [0, -1, 1, -2, 2];
+/** 보드·조각 화면이 이 시간(ms) 동안 전혀 안 바뀌면 탈락 */
+const STALE_SCREEN_MS = 6000;
 
 const SCORE_TABLE = { 1: 100, 2: 300, 3: 500, 4: 800 };
 const LEVEL_SPEED = [800, 700, 600, 500, 400, 300, 250, 200, 150, 100];
@@ -59,8 +61,47 @@ class TetrisGame {
     this.gameOver = false;
     this.bag = [];
     this.comboCount = 0;
+    this._freezeSig = '';
+    this._freezeSince = 0;
 
     this._bindKeys();
+  }
+
+  _resetFreezeWatch() {
+    this._freezeSig = '';
+    this._freezeSince = 0;
+  }
+
+  _getFreezeSignature() {
+    let s = '';
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) s += this.board[r][c] ? '1' : '0';
+    }
+    if (this.current) {
+      const p = this.current;
+      s += '|' + p.type + ',' + p.x + ',' + p.y + ',';
+      for (let r = 0; r < p.shape.length; r++) s += p.shape[r].join('');
+    } else {
+      s += '|_';
+    }
+    s += '|' + (this.next ? this.next.type : '-');
+    return s;
+  }
+
+  /** 화면(보드+현재 조각)이 STALE_SCREEN_MS 동안 동일하면 사망 */
+  _checkFrozenScreen(now) {
+    if (this.gameOver || !this.running || this.paused) {
+      this._resetFreezeWatch();
+      return;
+    }
+    const sig = this._getFreezeSignature();
+    if (sig !== this._freezeSig) {
+      this._freezeSig = sig;
+      this._freezeSince = now;
+      return;
+    }
+    if (!this._freezeSince) this._freezeSince = now;
+    if (now - this._freezeSince >= STALE_SCREEN_MS) this._endGame();
   }
 
   _emptyBoard() {
@@ -91,13 +132,19 @@ class TetrisGame {
     this.paused = false;
     this.bag = [];
     this.comboCount = 0;
+    this._resetFreezeWatch();
     this.next = this._spawnPiece(this._getFromBag());
     this._spawn();
     this.lastTime = performance.now();
+    this._freezeSince = this.lastTime;
     requestAnimationFrame(this._loop.bind(this));
   }
 
-  stop() { this.running = false; this.paused = false; }
+  stop() {
+    this.running = false;
+    this.paused = false;
+    this._resetFreezeWatch();
+  }
 
   togglePause() {
     if (!this.allowPause || !this.running || this.gameOver) return;
@@ -233,6 +280,7 @@ class TetrisGame {
         this.dropAccum = 0;
       }
       this._checkNewBlockBlocked();
+      this._checkFrozenScreen(ts);
     }
     this._draw();
     if (!this.paused) this.onStateChange(this._getState());
