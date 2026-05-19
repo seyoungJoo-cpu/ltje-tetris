@@ -3,7 +3,7 @@
 
 const COLS = 10, ROWS = 20;
 const BLOCK = 24; // my canvas block size
-const OPP_BLOCK = 18; // opponent minimap block size (온라인 상대 미니맵)
+const OPP_BLOCK = 13; // opponent minimap block size (온라인 상대 미니맵)
 
 const COLORS = {
   I: '#00e5ff',
