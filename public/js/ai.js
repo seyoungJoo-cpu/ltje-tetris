@@ -380,7 +380,6 @@ class AIBot {
       }
     }
 
-    this._checkNewBlockBlocked();
     this._draw();
     if (this.onStateChange) this.onStateChange(this._getState());
     this.animFrame = requestAnimationFrame(this._loop.bind(this));

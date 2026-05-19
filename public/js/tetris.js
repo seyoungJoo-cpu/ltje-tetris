@@ -111,21 +111,20 @@ class TetrisGame {
     if (this.running) this._draw();
   }
 
-  /** 스폰 위치(y=0)에 해당 타입 조각을 둘 수 있는지 */
-  _canSpawnTypeAtEntry(type) {
-    const probe = this._spawnPiece(type);
-    return !this._collides(probe.shape, probe.x, probe.y);
+  /** 가비지 shift 시 맨 윗줄이 밀려 나가면 탑아웃 */
+  _wouldOverflowOnPush() {
+    return this.board[0].some((c) => c !== 0);
   }
 
-  /** 다음에 나올 블록(미리보기 next)을 필드에 꺼낼 수 없으면 사망 */
-  _isNewBlockSpawnBlocked() {
-    if (!this.next) return false;
-    return !this._canSpawnTypeAtEntry(this.next.type);
-  }
-
-  _checkNewBlockBlocked() {
+  _checkGameOver() {
     if (this.gameOver || !this.running) return;
-    if (this._isNewBlockSpawnBlocked()) this._endGame();
+    if (this._wouldOverflowOnPush()) {
+      this._endGame();
+      return;
+    }
+    if (this.current && this._collides(this.current.shape, this.current.x, this.current.y)) {
+      this._endGame();
+    }
   }
 
   _endGame() {
@@ -143,15 +142,13 @@ class TetrisGame {
   }
 
   _spawn() {
-    const incoming = this.next;
-    this.current = incoming;
+    this.current = this.next;
     this.next = this._spawnPiece(this._getFromBag());
-    if (!incoming || this._collides(incoming.shape, incoming.x, incoming.y)) {
+    if (this._collides(this.current.shape, this.current.x, this.current.y)) {
       this._endGame();
       return;
     }
     this._drawNext();
-    this._checkNewBlockBlocked();
   }
 
   _loop(ts) {
@@ -165,7 +162,6 @@ class TetrisGame {
         this._drop();
         this.dropAccum = 0;
       }
-      this._checkNewBlockBlocked();
     }
     this._draw();
     if (!this.paused) this.onStateChange(this._getState());
@@ -314,7 +310,7 @@ class TetrisGame {
         this._penaltyRows(penalty.lines || penalty.power || 1, 1);
     }
     this._resolveCurrentAfterGarbage();
-    this._checkNewBlockBlocked();
+    this._checkGameOver();
   }
 
   _garbageRectOccupied(px, py, w, h) {
@@ -344,6 +340,10 @@ class TetrisGame {
     const n = Math.max(1, Math.min(12, parseInt(lines, 10) || 1));
     const h = Math.min(3, Math.max(1, parseInt(holes, 10) || 1));
     for (let i = 0; i < n; i++) {
+      if (this._wouldOverflowOnPush()) {
+        this._endGame();
+        return;
+      }
       this.board.shift();
       const row = Array(COLS).fill('G');
       const used = new Set();
@@ -361,6 +361,10 @@ class TetrisGame {
   _penaltyCheese(lines) {
     const n = Math.max(2, Math.min(10, parseInt(lines, 10) || 3));
     for (let i = 0; i < n; i++) {
+      if (this._wouldOverflowOnPush()) {
+        this._endGame();
+        return;
+      }
       this.board.shift();
       const row = Array(COLS).fill(0);
       const blocks = 7 + Math.floor(Math.random() * 2);
@@ -400,7 +404,6 @@ class TetrisGame {
         return;
       }
     }
-    this._checkNewBlockBlocked();
   }
 
   _getGhostY() {
